@@ -1,0 +1,720 @@
+"""
+TSM Stop Loss Strategies - Translated from TradeStation EasyLanguage to Python
+Copyright concepts by P.J. Kaufman (Trading Systems and Methods, 6th Edition)
+
+All 10 stop-loss strategies operate on pandas DataFrames with columns:
+    'open', 'high', 'low', 'close', 'volume'
+Index should be DatetimeIndex.
+
+Each class exposes:
+    - check_stop(bar_index) -> bool : whether the stop was triggered on that bar
+    - update(bar_index)             : update internal state after each bar
+    - get_stop_price() -> float     : current stop price (where applicable)
+    - reset()                       : reset state for a new trade
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def rolling_stddev(series: pd.Series, period: int) -> pd.Series:
+    return series.rolling(period).std(ddof=1)
+
+
+def rolling_mean(series: pd.Series, period: int) -> pd.Series:
+    return series.rolling(period).mean()
+
+
+def true_range(df: pd.DataFrame) -> pd.Series:
+    high = df['high']
+    low = df['low']
+    prev_close = df['close'].shift(1)
+    return pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+
+def avg_true_range(df: pd.DataFrame, period: int) -> pd.Series:
+    return true_range(df).rolling(period).mean()
+
+
+# ===========================================================================
+# 1. StdDev Trailing Stop  (TSM Moving Average Stop Loss)
+# ===========================================================================
+
+class StdDevTrailingStop:
+    """
+    Tracks highest high (long) or lowest low (short) since entry, then places
+    a stop at:
+        Long:  highprice - stopfactor * stddev(close changes, stopper)
+        Short: lowprice  + stopfactor * stddev(close changes, stopper)
+    """
+
+    def __init__(self, stopper: int = 252, stopfactor: float = 12.0):
+        self.stopper = stopper
+        self.stopfactor = stopfactor
+        self.reset()
+
+    def reset(self):
+        self.high_price = -np.inf
+        self.low_price = np.inf
+        self.stop_price = None
+
+    def update(self, df: pd.DataFrame, idx: int, position: int):
+        close = df['close'].iloc[idx]
+        if position > 0:
+            self.high_price = max(self.high_price, close)
+        elif position < 0:
+            self.low_price = min(self.low_price, close)
+
+        if idx < self.stopper:
+            self.stop_price = None
+            return
+
+        changes = df['close'].diff().iloc[max(0, idx - self.stopper + 1):idx + 1]
+        stop_range = changes.std(ddof=1)
+
+        if position > 0:
+            self.stop_price = self.high_price - self.stopfactor * stop_range
+        elif position < 0:
+            self.stop_price = self.low_price + self.stopfactor * stop_range
+        else:
+            self.stop_price = None
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if self.stop_price is None:
+            return False
+        close = df['close'].iloc[idx]
+        if position > 0 and close <= self.stop_price:
+            return True
+        if position < 0 and close >= self.stop_price:
+            return True
+        return False
+
+    def get_stop_price(self) -> Optional[float]:
+        return self.stop_price
+
+
+# ===========================================================================
+# 2. ATR Trailing Stop with Trigger  (TSM Trend with Trailing Stop)
+# ===========================================================================
+
+class ATRTrailingStop:
+    """
+    The stop only activates after the trade has moved trigger * ATR in your
+    favor. Once activated, trails at stopfactor * ATR from the trade's
+    highest high (long) or lowest low (short).
+    """
+
+    def __init__(self, atr_period: int = 20, stopfactor: float = 2.5,
+                 trigger: float = 2.0):
+        self.atr_period = atr_period
+        self.stopfactor = stopfactor
+        self.trigger = trigger
+        self.reset()
+
+    def reset(self):
+        self.trade_entry = None
+        self.trade_high = -np.inf
+        self.trade_low = np.inf
+        self.trigger_ok = False
+        self.stop_price = None
+
+    def set_entry(self, entry_price: float):
+        self.trade_entry = entry_price
+        self.trade_high = entry_price
+        self.trade_low = entry_price
+        self.trigger_ok = False
+        self.stop_price = None
+
+    def update(self, df: pd.DataFrame, idx: int, position: int):
+        close = df['close'].iloc[idx]
+        self.trade_high = max(self.trade_high, close)
+        self.trade_low = min(self.trade_low, close)
+
+        atr_series = avg_true_range(df.iloc[:idx + 1], self.atr_period)
+        if len(atr_series) == 0 or pd.isna(atr_series.iloc[-1]):
+            self.stop_price = None
+            return
+        atr = atr_series.iloc[-1]
+
+        if self.trade_entry is not None and not self.trigger_ok:
+            if position > 0 and close - self.trade_entry >= self.trigger * atr:
+                self.trigger_ok = True
+            elif position < 0 and self.trade_entry - close >= self.trigger * atr:
+                self.trigger_ok = True
+
+        if self.trigger_ok:
+            if position > 0:
+                self.stop_price = self.trade_high - self.stopfactor * atr
+            elif position < 0:
+                self.stop_price = self.trade_low + self.stopfactor * atr
+        else:
+            self.stop_price = None
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if self.stop_price is None:
+            return False
+        close = df['close'].iloc[idx]
+        if position > 0 and close < self.stop_price:
+            return True
+        if position < 0 and close > self.stop_price:
+            return True
+        return False
+
+    def get_stop_price(self) -> Optional[float]:
+        return self.stop_price
+
+
+# ===========================================================================
+# 3. DevStop - Tiered Standard Deviation Stop  (TSM Trend with DevStop)
+# ===========================================================================
+
+class DevStop:
+    """
+    Based on Cynthia Kase's DevStop concept. Uses a 2-day true range and its
+    standard deviation to create 3 tiered stop levels. Enters with 3 units
+    and removes 1 unit at each level:
+        DevStop1 = entry +/- (avg_DTR + 1.0 * sd)
+        DevStop2 = entry +/- (avg_DTR + 2.2 * sd)
+        DevStop3 = entry +/- (avg_DTR + 3.6 * sd)
+    """
+
+    def __init__(self, atr_period: int = 20):
+        self.atr_period = atr_period
+        self.reset()
+
+    def reset(self):
+        self.dev_stop1 = None
+        self.dev_stop2 = None
+        self.dev_stop3 = None
+        self.contracts = 0
+
+    def set_entry(self, df: pd.DataFrame, idx: int, position: int,
+                  num_contracts: int = 3):
+        self.contracts = num_contracts
+        close = df['close'].iloc[idx]
+
+        # 2-day true range
+        dtr = self._calc_dtr(df, idx)
+        if dtr is None or len(dtr) < self.atr_period:
+            return
+
+        avg = dtr.rolling(self.atr_period).mean().iloc[-1]
+        sd = dtr.rolling(self.atr_period).std(ddof=1).iloc[-1]
+
+        if pd.isna(avg) or pd.isna(sd):
+            return
+
+        if position > 0:
+            self.dev_stop1 = close - avg - sd
+            self.dev_stop2 = close - avg - 2.2 * sd
+            self.dev_stop3 = close - avg - 3.6 * sd
+        elif position < 0:
+            self.dev_stop1 = close + avg + sd
+            self.dev_stop2 = close + avg + 2.2 * sd
+            self.dev_stop3 = close + avg + 3.6 * sd
+
+    def _calc_dtr(self, df: pd.DataFrame, idx: int) -> Optional[pd.Series]:
+        if idx < 2:
+            return None
+        high = df['high'].iloc[:idx + 1]
+        low = df['low'].iloc[:idx + 1]
+        close_2 = df['close'].shift(2).iloc[:idx + 1]
+        dtr = pd.concat([
+            high - low.shift(2),
+            (high - close_2).abs(),
+            (low - close_2).abs(),
+        ], axis=1).max(axis=1)
+        return dtr
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> int:
+        """Returns the number of contracts to close (0, 1, 2, or 3)."""
+        if self.contracts <= 0:
+            return 0
+
+        close = df['close'].iloc[idx]
+        contracts_to_close = 0
+
+        if position > 0:
+            if self.dev_stop3 is not None and close < self.dev_stop3:
+                contracts_to_close = self.contracts  # close all remaining
+            elif self.dev_stop2 is not None and self.contracts >= 2 and close < self.dev_stop2:
+                contracts_to_close = min(2, self.contracts)
+            elif self.dev_stop1 is not None and self.contracts >= 3 and close < self.dev_stop1:
+                contracts_to_close = 1
+        elif position < 0:
+            if self.dev_stop3 is not None and close > self.dev_stop3:
+                contracts_to_close = self.contracts
+            elif self.dev_stop2 is not None and self.contracts >= 2 and close > self.dev_stop2:
+                contracts_to_close = min(2, self.contracts)
+            elif self.dev_stop1 is not None and self.contracts >= 3 and close > self.dev_stop1:
+                contracts_to_close = 1
+
+        self.contracts -= contracts_to_close
+        return contracts_to_close
+
+    def get_stop_prices(self) -> dict:
+        return {
+            'dev_stop1': self.dev_stop1,
+            'dev_stop2': self.dev_stop2,
+            'dev_stop3': self.dev_stop3,
+        }
+
+
+# ===========================================================================
+# 4. Volatility Spike Exit  (TSM Moving Average Volatility Exits)
+# ===========================================================================
+
+class VolatilitySpikeExit:
+    """
+    Exits when volatility spikes above exitabove * |returns| and the price
+    move is in the position's direction (profitable vol spike). Re-enters
+    when volatility subsides to exitvol / 4.
+    """
+
+    def __init__(self, vol_period: int = 20, exitabove: float = 5.0):
+        self.vol_period = vol_period
+        self.exitabove = exitabove
+        self.reset()
+
+    def reset(self):
+        self.hv_exit = 0       # 0=none, 1=exited long, -1=exited short
+        self.exit_vol = 0.0
+
+    def on_new_signal(self):
+        """Call when the underlying trend signal changes."""
+        self.hv_exit = 0
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if idx < 1:
+            return False
+
+        returns = df['close'].iloc[idx] / df['close'].iloc[idx - 1] - 1
+        ret_series = df['close'].pct_change().iloc[max(0, idx - self.vol_period + 1):idx + 1]
+        vol = ret_series.std(ddof=1)
+
+        if vol > self.exitabove * abs(returns) and position * returns > 0:
+            if position > 0:
+                self.hv_exit = 1
+                self.exit_vol = abs(returns)
+                return True
+            elif position < 0:
+                self.hv_exit = -1
+                self.exit_vol = abs(returns)
+                return True
+        return False
+
+    def check_reentry(self, df: pd.DataFrame, idx: int) -> int:
+        """
+        Returns: 1 if should re-enter long, -1 if short, 0 if no reentry.
+        """
+        if self.hv_exit == 0 or idx < 1:
+            return 0
+
+        returns = abs(df['close'].iloc[idx] / df['close'].iloc[idx - 1] - 1)
+        if returns < self.exit_vol / 4:
+            direction = self.hv_exit  # re-enter in same direction
+            self.hv_exit = 0
+            return direction
+        return 0
+
+
+# ===========================================================================
+# 5. Volatility Filter Exit  (TSM Volatility Filters)
+# ===========================================================================
+
+class VolFilterRule(IntEnum):
+    NO_FILTER = 0
+    ENTRY_ONLY = 1
+    EXIT_ANY_DIRECTION = 2
+    EXIT_PROFITABLE_DIRECTION = 3
+    EXIT_LOSING_DIRECTION = 4
+    ENTRY_AND_EXIT = 5
+
+
+class VolatilityFilterExit:
+    """
+    Multiple configurable rules for volatility-based exits:
+        Rule 2: Exit when vol > threshold (any direction)
+        Rule 3: Exit when vol > threshold AND price moved profitably
+        Rule 4: Exit when vol > threshold AND price moved against you
+        Rule 5: Combined entry filter + Rule 4 exit
+    """
+
+    def __init__(self, rule: int = 0, length: int = 20,
+                 x_factor: float = 99.0):
+        self.rule = VolFilterRule(rule)
+        self.length = length
+        self.x_factor = x_factor
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if idx < self.length + 1:
+            return False
+
+        close = df['close'].iloc[idx]
+        prev_close = df['close'].iloc[idx - 1]
+        change = abs(close - prev_close)
+
+        changes = df['close'].diff().abs().iloc[max(0, idx - self.length):idx]
+        v_avg = changes.mean()
+        v_sd = changes.std(ddof=1)
+        x_uplimit = v_avg + self.x_factor * v_sd
+
+        price_up = close > prev_close
+        price_down = close < prev_close
+
+        # Rule 2 or 3: exit on high vol + profitable direction
+        if self.rule in (VolFilterRule.EXIT_ANY_DIRECTION,
+                         VolFilterRule.EXIT_PROFITABLE_DIRECTION):
+            if position > 0 and price_up and change > x_uplimit:
+                return True
+            if position < 0 and price_down and change > x_uplimit:
+                return True
+
+        # Rule 2 or 4 or 5: exit on high vol + losing direction
+        if self.rule in (VolFilterRule.EXIT_ANY_DIRECTION,
+                         VolFilterRule.EXIT_LOSING_DIRECTION,
+                         VolFilterRule.ENTRY_AND_EXIT):
+            if position > 0 and close <= prev_close and change > x_uplimit:
+                return True
+            if position < 0 and close >= prev_close and change > x_uplimit:
+                return True
+
+        return False
+
+
+# ===========================================================================
+# 6. VIX / Regime Filter Stop  (TSM Trend with VIX Filter)
+# ===========================================================================
+
+class VIXFilterStop:
+    """
+    Exits positions when a volatility measure (annualized vol, VIX, or VXX)
+    exceeds riskexitthreshold. Supports 3 risk sources:
+        0 = annualized vol of price returns (computed from close)
+        1 = external VIX series (pass as vix_series)
+        2 = external VXX series (pass as vix_series)
+    """
+
+    def __init__(self, risk_option: int = 0, vol_period: int = 20,
+                 risk_exit_threshold: float = 50.0):
+        self.risk_option = risk_option
+        self.vol_period = vol_period
+        self.risk_exit_threshold = risk_exit_threshold
+
+    def _get_avol(self, df: pd.DataFrame, idx: int,
+                  vix_series: Optional[pd.Series] = None) -> float:
+        if self.risk_option == 0:
+            returns = df['close'].pct_change()
+            window = returns.iloc[max(0, idx - self.vol_period + 1):idx + 1]
+            avol = 100 * window.std(ddof=1) * np.sqrt(252)
+            return avol if not pd.isna(avol) else 0.0
+        else:
+            if vix_series is not None and idx < len(vix_series):
+                return vix_series.iloc[idx]
+            return 0.0
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int,
+                   trend_rising: bool,
+                   vix_series: Optional[pd.Series] = None) -> bool:
+        """
+        Returns True if the volatility exit triggers. The trend exit
+        (trend turning) is separate — this only checks the vol threshold.
+        """
+        if position == 0:
+            return False
+
+        avol = self._get_avol(df, idx, vix_series)
+
+        if avol > self.risk_exit_threshold:
+            return True
+        return False
+
+    def check_entry_allowed(self, df: pd.DataFrame, idx: int,
+                            risk_entry_threshold: float = 40.0,
+                            vix_series: Optional[pd.Series] = None) -> bool:
+        avol = self._get_avol(df, idx, vix_series)
+        return avol < risk_entry_threshold and avol < self.risk_exit_threshold
+
+
+# ===========================================================================
+# 7. Annualized Vol Filter Stop  (TSM Trend with Annualized Vol Filter)
+# ===========================================================================
+
+class AnnualizedVolStop:
+    """
+    Simplified version of the VIX filter using only price data. Exits when
+    annualized volatility of returns exceeds riskexitthreshold.
+    Same logic as VIXFilterStop with risk_option=0, but with the vol-exit
+    flag that prevents re-entry until the trend changes direction.
+    """
+
+    def __init__(self, vol_period: int = 20,
+                 risk_exit_threshold: float = 0.50):
+        self.vol_period = vol_period
+        self.risk_exit_threshold = risk_exit_threshold
+        self.reset()
+
+    def reset(self):
+        self.vol_exit = False
+        self.last_trend_dir = 0
+
+    def update_trend(self, trend_dir: int):
+        """Call each bar with +1 (up) or -1 (down). Resets vol_exit on change."""
+        if trend_dir != self.last_trend_dir:
+            self.vol_exit = False
+        self.last_trend_dir = trend_dir
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if position == 0 or self.vol_exit:
+            return False
+
+        returns = df['close'].pct_change()
+        window = returns.iloc[max(0, idx - self.vol_period + 1):idx + 1]
+        avol = 100 * window.std(ddof=1) * np.sqrt(252)
+
+        if pd.isna(avol):
+            return False
+
+        if avol > self.risk_exit_threshold:
+            self.vol_exit = True
+            return True
+        return False
+
+    def entry_allowed(self) -> bool:
+        return not self.vol_exit
+
+
+# ===========================================================================
+# 8. Historic Vol Filter Stop  (TSM Trend with Historic Vol Filter)
+# ===========================================================================
+
+class HistoricVolStop:
+    """
+    Exit when historic volatility exceeds a threshold. Supports two modes:
+        risk_option 0: annualized std dev of returns
+        risk_option 1: ATR-based volatility
+    No re-entry blocking (unlike AnnualizedVolStop).
+    """
+
+    def __init__(self, risk_option: int = 0, vol_period: int = 20,
+                 risk_exit_threshold: float = 0.60, atr_period: int = 20):
+        self.risk_option = risk_option
+        self.vol_period = vol_period
+        self.risk_exit_threshold = risk_exit_threshold
+        self.atr_period = atr_period
+
+    def _get_avol(self, df: pd.DataFrame, idx: int) -> float:
+        if self.risk_option == 0:
+            returns = df['close'].pct_change()
+            window = returns.iloc[max(0, idx - self.vol_period + 1):idx + 1]
+            avol = window.std(ddof=1) * np.sqrt(252)
+            return avol if not pd.isna(avol) else 0.0
+        else:
+            atr_s = avg_true_range(df.iloc[:idx + 1], self.vol_period)
+            if len(atr_s) > 0 and not pd.isna(atr_s.iloc[-1]):
+                return atr_s.iloc[-1]
+            return 0.0
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if position == 0 or self.risk_exit_threshold == 0:
+            return False
+
+        avol = self._get_avol(df, idx)
+        if avol > self.risk_exit_threshold:
+            return True
+        return False
+
+    def check_entry_allowed(self, df: pd.DataFrame, idx: int,
+                            risk_entry_threshold: float = 0.40) -> bool:
+        if risk_entry_threshold == 0:
+            return True
+        avol = self._get_avol(df, idx)
+        return avol < risk_entry_threshold
+
+
+# ===========================================================================
+# 9. Equity Curve Stop  (TSM Equity Trend)
+# ===========================================================================
+
+class EquityCurveStop:
+    """
+    Not a price-level stop. Reduces position size when the equity curve
+    trends downward. When the EMA of equity drops, position is reduced to
+    reduce_pct of normal size.
+    """
+
+    def __init__(self, eq_length: int = 10, normal_size: int = 10,
+                 reduce_pct: float = 50.0):
+        self.eq_length = eq_length
+        self.normal_size = normal_size
+        self.reduce_pct = reduce_pct
+        self.equity_history: list[float] = []
+
+    def reset(self):
+        self.equity_history = []
+
+    def update(self, current_equity: float):
+        self.equity_history.append(current_equity)
+
+    def get_target_size(self) -> int:
+        if len(self.equity_history) < self.eq_length + 1:
+            return self.normal_size
+
+        eq_series = pd.Series(self.equity_history)
+        ema = eq_series.rolling(self.eq_length).mean()
+        current_ema = ema.iloc[-1]
+        prev_ema = ema.iloc[-2]
+
+        if pd.isna(current_ema) or pd.isna(prev_ema):
+            return self.normal_size
+
+        if current_ema < prev_ema:
+            return max(1, int(self.normal_size * self.reduce_pct / 100))
+        return self.normal_size
+
+    def should_reduce(self) -> bool:
+        target = self.get_target_size()
+        return target < self.normal_size
+
+    def get_contracts_to_shed(self, current_contracts: int) -> int:
+        target = self.get_target_size()
+        diff = current_contracts - target
+        return max(0, diff)
+
+
+# ===========================================================================
+# 10. Bollinger Mean Reversion Exit  (TSM Bollinger Squeeze)
+# ===========================================================================
+
+class BollingerMeanReversionExit:
+    """
+    Exits longs when price touches or crosses above the moving average
+    (Bollinger midline). Exits shorts when price touches or crosses below.
+    Acts as a soft stop / mean-reversion take-profit.
+    """
+
+    def __init__(self, period: int = 20, use_ma_exit: bool = True):
+        self.period = period
+        self.use_ma_exit = use_ma_exit
+
+    def check_stop(self, df: pd.DataFrame, idx: int, position: int) -> bool:
+        if not self.use_ma_exit or idx < self.period:
+            return False
+
+        window = df['close'].iloc[max(0, idx - self.period + 1):idx + 1]
+        trend = window.mean()
+        high = df['high'].iloc[idx]
+        low = df['low'].iloc[idx]
+
+        if position > 0 and high >= trend:
+            return True
+        if position < 0 and low <= trend:
+            return True
+        return False
+
+    def get_ma(self, df: pd.DataFrame, idx: int) -> Optional[float]:
+        if idx < self.period:
+            return None
+        window = df['close'].iloc[max(0, idx - self.period + 1):idx + 1]
+        return window.mean()
+
+
+# ===========================================================================
+# Example usage
+# ===========================================================================
+
+if __name__ == '__main__':
+    # Generate sample data for demonstration
+    np.random.seed(42)
+    n = 500
+    dates = pd.date_range('2023-01-01', periods=n, freq='B')
+    close = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    high = close + np.abs(np.random.randn(n) * 0.3)
+    low = close - np.abs(np.random.randn(n) * 0.3)
+    open_ = close + np.random.randn(n) * 0.1
+    volume = np.random.randint(1000, 10000, n).astype(float)
+
+    df = pd.DataFrame({
+        'open': open_, 'high': high, 'low': low,
+        'close': close, 'volume': volume
+    }, index=dates)
+
+    print("=" * 60)
+    print("TSM Stop Loss Strategies - Demo")
+    print("=" * 60)
+
+    # --- 1. StdDev Trailing Stop ---
+    stop1 = StdDevTrailingStop(stopper=252, stopfactor=12.0)
+    stop1.update(df, 400, position=1)
+    print(f"\n1. StdDev Trailing Stop price:  {stop1.get_stop_price():.4f}")
+
+    # --- 2. ATR Trailing Stop ---
+    stop2 = ATRTrailingStop(atr_period=20, stopfactor=2.5, trigger=2.0)
+    stop2.set_entry(df['close'].iloc[300])
+    for i in range(300, 400):
+        stop2.update(df, i, position=1)
+    print(f"2. ATR Trailing Stop price:     {stop2.get_stop_price()}")
+
+    # --- 3. DevStop ---
+    stop3 = DevStop(atr_period=20)
+    stop3.set_entry(df, 300, position=1, num_contracts=3)
+    prices = stop3.get_stop_prices()
+    print(f"3. DevStop levels:              "
+          f"L1={prices['dev_stop1']:.4f}  "
+          f"L2={prices['dev_stop2']:.4f}  "
+          f"L3={prices['dev_stop3']:.4f}")
+
+    # --- 4. Volatility Spike Exit ---
+    stop4 = VolatilitySpikeExit(vol_period=20, exitabove=5.0)
+    triggered = stop4.check_stop(df, 400, position=1)
+    print(f"4. Volatility Spike triggered:  {triggered}")
+
+    # --- 5. Volatility Filter Exit ---
+    stop5 = VolatilityFilterExit(rule=4, length=20, x_factor=2.0)
+    triggered = stop5.check_stop(df, 400, position=1)
+    print(f"5. Vol Filter (rule 4) triggered: {triggered}")
+
+    # --- 6. VIX Filter Stop ---
+    stop6 = VIXFilterStop(risk_option=0, vol_period=20,
+                          risk_exit_threshold=50.0)
+    triggered = stop6.check_stop(df, 400, position=1, trend_rising=True)
+    print(f"6. VIX Filter triggered:        {triggered}")
+
+    # --- 7. Annualized Vol Stop ---
+    stop7 = AnnualizedVolStop(vol_period=20, risk_exit_threshold=0.50)
+    triggered = stop7.check_stop(df, 400, position=1)
+    print(f"7. Annualized Vol triggered:    {triggered}")
+
+    # --- 8. Historic Vol Stop ---
+    stop8 = HistoricVolStop(risk_option=0, vol_period=20,
+                            risk_exit_threshold=0.60)
+    triggered = stop8.check_stop(df, 400, position=1)
+    print(f"8. Historic Vol triggered:      {triggered}")
+
+    # --- 9. Equity Curve Stop ---
+    stop9 = EquityCurveStop(eq_length=10, normal_size=10, reduce_pct=50)
+    for i in range(50):
+        stop9.update(10000 - i * 50)  # declining equity
+    target = stop9.get_target_size()
+    print(f"9. Equity Curve target size:    {target} (normal=10)")
+
+    # --- 10. Bollinger Mean Reversion Exit ---
+    stop10 = BollingerMeanReversionExit(period=20, use_ma_exit=True)
+    triggered = stop10.check_stop(df, 400, position=1)
+    ma = stop10.get_ma(df, 400)
+    print(f"10. Bollinger MR exit triggered: {triggered}  (MA={ma:.4f})")
+
+    print("\n" + "=" * 60)
+    print("All 10 stop-loss strategies loaded successfully.")
+    print("=" * 60)

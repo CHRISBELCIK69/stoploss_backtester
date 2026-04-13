@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Options contract backtester</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+  <link rel="stylesheet" href="backtester.css" />
+</head>
+<body>
+<div class="page">
+
+  <h1>Options contract backtester</h1>
+  <p class="subtitle">Paste contracts, run all exit strategies at once, compare stop levels visually.</p>
+
+  <!-- Contract input -->
+  <div class="card">
+    <div class="section-label">Contract list &mdash; one per line</div>
+    <div class="format-hint">
+      0DTE: &nbsp; OCC, ENTRY_TIME &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EXAMPLE: SPY260112C00690000, 09:30<br>
+      SWING: OCC, ENTRY_TIME, ENTRY_DATE &nbsp; EXAMPLE: AMZN260306C00220000, 08:59, 2026-02-25
+    </div>
+    <div class="row" style="margin-bottom:8px;align-items:flex-end">
+      <div class="field" style="max-width:140px">
+        <label>Contracts (qty)</label>
+        <input type="number" id="qty" value="1" min="1" />
+      </div>
+      <div class="field" style="flex:1;min-width:240px">
+        <label>Strategy filter (substring, comma OR list)</label>
+        <input type="text" id="strategyFilter" placeholder="e.g. trailing, atr, vwap — empty = all" />
+      </div>
+    </div>
+    <textarea id="contractInput" rows="4">SPY260112C00690000, 09:30</textarea>
+    <div id="parseErr" class="err"></div>
+    <div class="progress"><div class="progress-bar" id="progBar"></div></div>
+    <button class="run-btn" id="runBtn" onclick="runBacktest()">Run backtest</button>
+  </div>
+
+  <!-- Results get injected here per contract -->
+  <div id="contractResults"></div>
+
+  <!-- Fetch log -->
+  <div class="card hidden" id="logCard">
+    <div class="section-label">Fetch log</div>
+    <div class="log" id="logBox"></div>
+  </div>
+
+</div>
+
+<script>
+// Color generator — produces N visually distinct colors via golden-ratio HSL.
+// Scales to 200+ strategies without repeating identifiable hues.
+function generateColors(n) {
+  const colors = [];
+  const golden = 0.61803398875;
+  let h = 0.13;
+  for (let i = 0; i < n; i++) {
+    h = (h + golden) % 1;
+    // Alternate saturation/lightness so adjacent indices look different
+    const s = 65 + (i % 3) * 12;        // 65, 77, 89
+    const l = 55 + ((i % 5) - 2) * 6;   // 43, 49, 55, 61, 67
+    colors.push(`hsl(${Math.round(h * 360)}, ${s}%, ${l}%)`);
+  }
+  return colors;
+}
+
+let COLORS = generateColors(64);  // grows on demand
+let chartInstances = [];
+
+// Per-contract visibility filter — strategy ID → bool (only false hides)
+let strategyFilter = {};
+
+function resetZoom(canvasId) {
+  const inst = chartInstances.find(c => c.canvas && c.canvas.id === canvasId);
+  if (inst && inst.resetZoom) inst.resetZoom();
+}
+
+// ── Strategy chip toggle ───────────────────
+// Each chart instance is tagged with .contractId so we can find it
+function findChartForContract(contractId) {
+  return chartInstances.find(c => c.canvas && c.canvas.id === contractId + '_chart');
+}
+
+function setChipState(contractId, strategyId, on) {
+  const chip = document.querySelector(`.strategy-chip[data-contract="${contractId}"][data-strategy="${strategyId}"]`);
+  if (chip) chip.classList.toggle('off', !on);
+}
+
+function setStrategyVisible(contractId, strategyName, strategyId, visible) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+  // Find the matching dataset by label
+  const dsIdx = chart.data.datasets.findIndex(d => d.label === strategyName);
+  if (dsIdx === -1) return;
+  chart.setDatasetVisibility(dsIdx, visible);
+  setChipState(contractId, strategyId, visible);
+}
+
+// Per-chip click timer so single click can wait for double click
+const _chipClickTimers = {};
+
+function onChipClick(e, contractId, strategyIdx, strategyId) {
+  e.preventDefault();
+  const key = contractId + ':' + strategyId;
+  // Clear any pending click — if this fires twice quickly, dblclick handles it
+  if (_chipClickTimers[key]) {
+    clearTimeout(_chipClickTimers[key]);
+    _chipClickTimers[key] = null;
+  }
+  const chipEl = e.currentTarget;
+  _chipClickTimers[key] = setTimeout(() => {
+    _chipClickTimers[key] = null;
+    const chart = findChartForContract(contractId);
+    if (!chart) return;
+    const name = chipEl.querySelector('.chip-name').textContent;
+    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
+    if (dsIdx === -1) return;
+    const isVisible = chart.isDatasetVisible(dsIdx);
+    chart.setDatasetVisibility(dsIdx, !isVisible);
+    chart.update();
+    setChipState(contractId, strategyId, !isVisible);
+  }, 200);
+}
+
+function onChipDblClick(e, contractId, strategyIdx, strategyId) {
+  e.preventDefault();
+  // Cancel the pending single-click toggle
+  const key = contractId + ':' + strategyId;
+  if (_chipClickTimers[key]) {
+    clearTimeout(_chipClickTimers[key]);
+    _chipClickTimers[key] = null;
+  }
+  soloStrategy(contractId, strategyId);
+}
+
+function soloStrategy(contractId, strategyId) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+  const chips = document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`);
+
+  // strategyId === null means "show all"
+  chips.forEach(chip => {
+    const sid  = chip.getAttribute('data-strategy');
+    const name = chip.querySelector('.chip-name').textContent;
+    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
+    if (dsIdx === -1) return;
+    const visible = strategyId === null || sid === strategyId;
+    chart.setDatasetVisibility(dsIdx, visible);
+    chip.classList.toggle('off', !visible);
+  });
+  chart.update();
+}
+
+function toggleAllStrategies(contractId, visible) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+  const chips = document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`);
+  chips.forEach(chip => {
+    const name = chip.querySelector('.chip-name').textContent;
+    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
+    if (dsIdx === -1) return;
+    chart.setDatasetVisibility(dsIdx, visible);
+    chip.classList.toggle('off', !visible);
+  });
+  chart.update();
+}
+
+function fmtDollars(v) { return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2); }
+function fmtTs(ts) { return ts.replace('T', ' ').slice(0, 16); }
+function showError(msg) {
+  const el = document.getElementById('parseErr');
+  el.textContent = msg; el.style.display = msg ? '' : 'none';
+}
+function setProgress(pct) { document.getElementById('progBar').style.width = pct + '%'; }
+
+function badgeFor(reason) {
+  const map = {
+    hard_stop:       ['hard stop',  'b-stop'],
+    trailing_stop:   ['trail stop', 'b-trail'],
+    break_even_stop: ['BE stop',    'b-eod'],
+    r_step_stop:     ['R stop',     'b-eod'],
+    expiry:          ['expiry',     'b-expiry'],
+    eod:             ['eod',        'b-eod'],
+  };
+  const [label, cls] = map[reason] || [reason, 'b-eod'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+
+// ── Build per-contract result block ────────
+function renderContractBlock(c, idx) {
+  const id = `contract_${idx}`;
+  const strategies = c.strategies || [];
+
+  // Strategy description lookup
+  const descMap = {};
+  strategies.forEach(s => { descMap[s.strategyName] = s.strategyId; });
+
+  // Summary table rows
+  let summaryRows = '';
+  strategies.forEach((r, si) => {
+    const pnlCls = r.pnl >= 0 ? 'pos' : 'neg';
+    summaryRows += `<tr>
+      <td>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${COLORS[si % COLORS.length]};margin-right:6px;vertical-align:middle"></span>
+        <strong>${r.strategyName}</strong>
+      </td>
+      <td>$${r.entryPrice.toFixed(2)}</td>
+      <td>$${r.exitPrice.toFixed(2)}</td>
+      <td class="${pnlCls}" style="font-family:var(--font-mono);font-weight:600">${fmtDollars(r.pnl)}</td>
+      <td class="${pnlCls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</td>
+      <td>${fmtTs(r.exitTs)}</td>
+      <td>${badgeFor(r.exitReason)}</td>
+    </tr>`;
+  });
+
+  return `
+    <div class="card" style="margin-top:20px">
+      <div class="section-label" style="font-size:13px;letter-spacing:0">${c.occ} &nbsp;&mdash;&nbsp; entry ${c.entryDate} ${c.entryTime} CST</div>
+
+      <!-- Strategy toggle bar (all OFF by default — click to show) -->
+      <div class="strategy-toggles" id="${id}_toggles">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Strategies:</span>
+          <button class="toggle-btn-mini" onclick="toggleAllStrategies('${id}', true)">All</button>
+          <button class="toggle-btn-mini" onclick="toggleAllStrategies('${id}', false)">None</button>
+          <span style="font-size:11px;color:var(--text-muted);margin-left:8px">click to show &middot; double-click to solo</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${strategies.map((r, si) => `
+            <label class="strategy-chip off" data-strategy="${r.strategyId}" data-contract="${id}"
+                   style="--chip-color:${COLORS[si % COLORS.length]}"
+                   onclick="onChipClick(event, '${id}', ${si}, '${r.strategyId}')"
+                   ondblclick="onChipDblClick(event, '${id}', ${si}, '${r.strategyId}')">
+              <span class="chip-dot" style="background:${COLORS[si % COLORS.length]}"></span>
+              <span class="chip-name">${r.strategyName}</span>
+              <span class="chip-pnl ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmtDollars(r.pnl)}</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Price + stop level chart -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0 6px">
+        <div style="font-size:11px;color:var(--text-secondary)">
+          Drag to box-zoom &middot; Wheel to zoom &middot; Shift+drag to pan &middot; ${strategies.length} strategies
+        </div>
+        <button class="run-btn" style="padding:4px 12px;font-size:11px;margin:0" onclick="resetZoom('${id}_chart')">Reset zoom</button>
+      </div>
+      <div style="height:620px;margin-bottom:20px"><canvas id="${id}_chart"></canvas></div>
+
+      <!-- Strategy how-it-works -->
+      <div style="margin-bottom:16px">
+        <div class="section-label">How each strategy works</div>
+        ${strategies.map((r, si) => `
+          <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;font-size:12px">
+            <span style="display:inline-block;min-width:10px;height:10px;border-radius:2px;background:${COLORS[si % COLORS.length]};margin-top:4px"></span>
+            <div>
+              <strong>${r.strategyName}</strong> &mdash;
+              exited at ${fmtTs(r.exitTs)} via <em>${r.exitReason.replace(/_/g, ' ')}</em>,
+              P&L <span class="${r.pnl >= 0 ? 'pos' : 'neg'}" style="font-weight:600">${fmtDollars(r.pnl)}</span>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Results table -->
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>
+            <th>Strategy</th><th>Entry $</th><th>Exit $</th><th>P&amp;L</th><th>Return</th><th>Exit time</th><th>Reason</th>
+          </tr></thead>
+          <tbody>${summaryRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+
+// ── Build the price + stop overlay chart ───
+function buildChart(c, idx) {
+  const canvasId = `contract_${idx}_chart`;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const bars       = c.bars || [];
+  const strategies = c.strategies || [];
+
+  // Time labels (show every Nth for readability)
+  const labels = bars.map(b => b.time.slice(11, 16));
+
+  // Price line (close prices)
+  const closePrices = bars.map(b => b.close);
+  const highPrices  = bars.map(b => b.high);
+  const lowPrices   = bars.map(b => b.low);
+
+  // Build a time→index map for aligning stop traces to bars
+  const timeIdx = {};
+  bars.forEach((b, i) => { timeIdx[b.time] = i; });
+
+  const datasets = [];
+
+  // Price high/low range as a filled band
+  datasets.push({
+    label: 'High',
+    data: highPrices,
+    borderColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    fill: '+1',
+    pointRadius: 0,
+    borderWidth: 0.5,
+    tension: 0.1,
+    order: 10,
+  });
+  datasets.push({
+    label: 'Low',
+    data: lowPrices,
+    borderColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: 'transparent',
+    pointRadius: 0,
+    borderWidth: 0.5,
+    tension: 0.1,
+    order: 10,
+  });
+
+  // Price close as the main line — extra thick so it pops over the stop lines
+  datasets.push({
+    label: 'Premium (close)',
+    data: closePrices,
+    borderColor: '#ffffff',
+    backgroundColor: 'transparent',
+    pointRadius: 0,
+    borderWidth: 2.5,
+    tension: 0.15,
+    order: 0,
+  });
+
+  // Entry price reference line
+  const entryPrice = strategies.length ? strategies[0].entryPrice : null;
+  if (entryPrice !== null) {
+    datasets.push({
+      label: 'Entry price',
+      data: bars.map(() => entryPrice),
+      borderColor: 'rgba(255,255,255,0.3)',
+      borderDash: [4, 4],
+      pointRadius: 0,
+      borderWidth: 1,
+      order: 9,
+    });
+  }
+
+  // Scale marker/line size down when many strategies are loaded
+  const isDense = strategies.length > 30;
+  const markerSize = isDense ? 6 : 10;
+  const lineWidth  = isDense ? 1.2 : 2;
+
+  // One stop-level line per strategy
+  strategies.forEach((strat, si) => {
+    const trace = strat.stopTrace || [];
+    // Map trace to bar indices — fill nulls where no trace data
+    const stopData = new Array(bars.length).fill(null);
+    trace.forEach(t => {
+      const bi = timeIdx[t.time];
+      if (bi !== undefined) stopData[bi] = t.stopPrice;
+    });
+
+    const color = COLORS[si % COLORS.length];
+
+    // Mark the exit point
+    const exitIdx = timeIdx[strat.exitTs];
+
+    datasets.push({
+      label: strat.strategyName,
+      data: stopData,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      pointRadius: stopData.map((v, i) => i === exitIdx ? markerSize : 0),
+      pointStyle: stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+      pointBackgroundColor: color,
+      pointBorderColor: '#ffffff',
+      pointBorderWidth: stopData.map((v, i) => i === exitIdx ? (isDense ? 1.5 : 3) : 0),
+      pointHoverRadius: stopData.map((v, i) => i === exitIdx ? markerSize + 4 : 0),
+      borderWidth: lineWidth,
+      borderDash: [4, 3],
+      tension: 0.1,
+      spanGaps: true,
+      order: 2 + si,
+    });
+  });
+
+  // Plugin: draw labels at exit points. With many strategies the labels
+  // become noise — only label if <= 20 strategies, OR only label EARLY exits
+  // (before 25% of bars) regardless of count.
+  const labelAll = strategies.length <= 20;
+  const exitLabelPlugin = {
+    id: 'exitLabels',
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart;
+      strategies.forEach((strat, si) => {
+        const exitIdx = timeIdx[strat.exitTs];
+        if (exitIdx === undefined) return;
+        const isEarlyExit = exitIdx < bars.length * 0.25;
+        if (!labelAll && !isEarlyExit) return;
+
+        // Find the dataset index for this strategy
+        const dsIdx = chart.data.datasets.findIndex(d => d.label === strat.strategyName);
+        if (dsIdx === -1) return;
+        if (!chart.isDatasetVisible(dsIdx)) return;
+
+        const meta = chart.getDatasetMeta(dsIdx);
+        const point = meta.data[exitIdx];
+        if (!point) return;
+
+        const color = COLORS[si % COLORS.length];
+        const label = `${strat.strategyName.replace(/Trailing /, 'T')} $${strat.exitPrice.toFixed(2)}`;
+
+        // Offset early exits upward, late exits to the right of the marker
+        const isEarly = exitIdx < bars.length * 0.25;
+        const xOffset = isEarly ? 14 : 14;
+        const yOffset = isEarly ? -8 - (si * 14) : 0;
+
+        ctx.save();
+        ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = color;
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.lineWidth = 3;
+        ctx.textBaseline = 'middle';
+        ctx.strokeText(label, point.x + xOffset, point.y + yOffset);
+        ctx.fillText(label, point.x + xOffset, point.y + yOffset);
+
+        // Connector line from marker to label for early exits
+        if (isEarly && yOffset !== 0) {
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 0.8;
+          ctx.setLineDash([2, 2]);
+          ctx.moveTo(point.x + 4, point.y);
+          ctx.lineTo(point.x + xOffset - 2, point.y + yOffset);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        ctx.restore();
+      });
+    },
+  };
+
+  const chart = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets },
+    plugins: [exitLabelPlugin],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'top',
+          align: 'start',
+          labels: {
+            color: '#bbb',
+            font: { size: 10 },
+            usePointStyle: true,
+            boxWidth: 14,
+            boxHeight: 8,
+            padding: 8,
+            filter: item => !['High', 'Low', 'Entry price'].includes(item.text),
+          },
+          onClick: (e, legendItem, legend) => {
+            // Toggle dataset visibility (built-in but make sure it stays)
+            const idx = legendItem.datasetIndex;
+            const ci = legend.chart;
+            ci.setDatasetVisibility(idx, !ci.isDatasetVisible(idx));
+            ci.update();
+          },
+        },
+        tooltip: {
+          backgroundColor: '#1e222d',
+          titleColor: '#ccc',
+          bodyColor: '#eee',
+          borderColor: '#333',
+          borderWidth: 1,
+          callbacks: {
+            label: ctx => {
+              const v = ctx.parsed.y;
+              if (v == null) return null;
+              return ` ${ctx.dataset.label}: $${v.toFixed(2)}`;
+            },
+          },
+        },
+        zoom: {
+          pan:  { enabled: true, mode: 'xy', modifierKey: 'shift' },
+          zoom: {
+            wheel: { enabled: true, speed: 0.1 },
+            pinch: { enabled: true },
+            drag:  { enabled: true, backgroundColor: 'rgba(108,140,255,0.15)', borderColor: '#6c8cff', borderWidth: 1 },
+            mode:  'xy',
+          },
+          limits: {
+            y: { minRange: 0.05 },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: {
+            color: '#555',
+            font: { size: 9 },
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 20,
+          },
+        },
+        y: {
+          grid: { color: 'rgba(128,128,128,0.08)' },
+          ticks: {
+            color: '#666',
+            font: { size: 10 },
+            callback: v => '$' + v.toFixed(2),
+          },
+        },
+      },
+    },
+  });
+
+  // Hide every strategy stop line by default — user clicks chips to reveal
+  chart.data.datasets.forEach((ds, idx) => {
+    // Keep the price line visible; hide everything else (strategy stops)
+    if (ds.label !== 'Premium (close)' && ds.label !== 'High' && ds.label !== 'Low' && ds.label !== 'Entry price') {
+      chart.setDatasetVisibility(idx, false);
+    }
+  });
+  chart.update();
+
+  chartInstances.push(chart);
+}
+
+
+// ── Run backtest ───────────────────────────
+async function runBacktest() {
+  showError('');
+  document.getElementById('logBox').textContent = '';
+  document.getElementById('contractResults').innerHTML = '';
+  document.getElementById('logCard').classList.add('hidden');
+
+  // Destroy old charts
+  chartInstances.forEach(c => c.destroy());
+  chartInstances = [];
+
+  const raw = document.getElementById('contractInput').value.trim();
+  if (!raw) { showError('Paste at least one contract.'); return; }
+
+  const qty = parseInt(document.getElementById('qty').value) || 1;
+  const filterRaw = document.getElementById('strategyFilter').value.trim().toLowerCase();
+  const filterTerms = filterRaw
+    ? filterRaw.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true; btn.textContent = 'Running...';
+  setProgress(10);
+
+  try {
+    const resp = await fetch('/api/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contracts: raw, qty }),
+    });
+
+    setProgress(80);
+    const data = await resp.json();
+
+    if (!resp.ok) { showError(data.error || 'Server error'); return; }
+
+    // Show log
+    if (data.log) {
+      document.getElementById('logBox').textContent = data.log;
+      document.getElementById('logCard').classList.remove('hidden');
+    }
+
+    const contracts = data.contracts || [];
+    if (!contracts.length) { showError('No valid results returned.'); return; }
+
+    // Apply filter — keep strategies whose name OR id matches any term
+    if (filterTerms.length) {
+      contracts.forEach(c => {
+        c.strategies = (c.strategies || []).filter(s => {
+          const hay = (s.strategyName + ' ' + s.strategyId).toLowerCase();
+          return filterTerms.some(t => hay.includes(t));
+        });
+      });
+    }
+
+    // Make sure the palette is big enough for the most populous contract
+    const maxStrategies = Math.max(...contracts.map(c => (c.strategies || []).length), 1);
+    if (maxStrategies > COLORS.length) {
+      COLORS = generateColors(maxStrategies + 16);
+    }
+
+    // Render each contract block
+    const container = document.getElementById('contractResults');
+    contracts.forEach((c, i) => {
+      container.innerHTML += renderContractBlock(c, i);
+    });
+
+    // Build charts after DOM is ready
+    contracts.forEach((c, i) => {
+      buildChart(c, i);
+    });
+
+  } catch (e) {
+    showError('Request failed: ' + e.message);
+  } finally {
+    setProgress(100);
+    btn.disabled = false; btn.textContent = 'Run backtest';
+  }
+}
+</script>
+</body>
+</html>
