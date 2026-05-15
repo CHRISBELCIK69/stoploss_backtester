@@ -38,6 +38,9 @@
     <button class="run-btn" id="runBtn" onclick="runBacktest()">Run backtest</button>
   </div>
 
+  <!-- Aggregate stats across all contracts (populated after run) -->
+  <div id="aggregateResults"></div>
+
   <!-- Results get injected here per contract -->
   <div id="contractResults"></div>
 
@@ -69,6 +72,108 @@ function generateColors(n) {
 let COLORS = generateColors(64);  // grows on demand
 let chartInstances = [];
 
+// ── Color blending for role-based extras ──────────────
+// Parse 'hsl(h, s%, l%)' or '#rrggbb' or 'hsl(...)' → {r, g, b}
+function _parseColor(c) {
+  if (typeof c !== 'string') return { r: 128, g: 128, b: 128 };
+  if (c.startsWith('hsl')) {
+    const m = c.match(/hsl\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)%,\s*(\d+(?:\.\d+)?)%\)/);
+    if (m) return _hslToRgb(+m[1], +m[2], +m[3]);
+  }
+  if (c.startsWith('#')) {
+    const hex = c.length === 4
+      ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]
+      : c;
+    return {
+      r: parseInt(hex.slice(1, 3), 16),
+      g: parseInt(hex.slice(3, 5), 16),
+      b: parseInt(hex.slice(5, 7), 16),
+    };
+  }
+  return { r: 128, g: 128, b: 128 };
+}
+
+function _hslToRgb(h, s, l) {
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if      (h < 60)  { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) {         g = c; b = x; }
+  else if (h < 240) {         g = x; b = c; }
+  else if (h < 300) { r = x;         b = c; }
+  else              { r = c;         b = x; }
+  return {
+    r: Math.round((r + m) * 255),
+    g: Math.round((g + m) * 255),
+    b: Math.round((b + m) * 255),
+  };
+}
+
+// Mix two colors. `mix` = how much of toColor (0 → all base, 1 → all to).
+function blendColors(baseColor, toColor, mix, alpha = 0.7) {
+  const b = _parseColor(baseColor);
+  const t = _parseColor(toColor);
+  const r = Math.round(b.r * (1 - mix) + t.r * mix);
+  const g = Math.round(b.g * (1 - mix) + t.g * mix);
+  const bl = Math.round(b.b * (1 - mix) + t.b * mix);
+  return `rgba(${r}, ${g}, ${bl}, ${alpha})`;
+}
+
+// Map an extra-trace name to its semantic role color.
+// SAFETY = warm red tint (downside protection)
+// TARGET = cool green tint (upside / profit lock)
+// NEUTRAL = strategy color with reduced opacity (no role inferred)
+const ROLE_SAFETY = '#e24b4a';   // red
+const ROLE_TARGET = '#1d9e75';   // green
+function extraColorForRole(strategyColor, traceName) {
+  const r = (traceName || '').toLowerCase();
+  // Safety-net patterns: hard/initial stops, lower band
+  if (/(^hard|^initial.*stop|^lower|t1.*stop|^bollinger.*stop)/.test(r)) {
+    return blendColors(strategyColor, ROLE_SAFETY, 0.55, 0.75);
+  }
+  // Target / upside patterns: profit targets, upper band, break-even, floors, stage locks
+  if (/(target|^upper|^arm|profit|stage|break|floor|^t2|^t3|lock)/.test(r)) {
+    return blendColors(strategyColor, ROLE_TARGET, 0.45, 0.7);
+  }
+  // Neutral fallback — translucent strategy color
+  return blendColors(strategyColor, strategyColor, 0, 0.55);
+}
+
+// Strategy family detection — strips trailing numeric suffix (_15, _30)
+// and known variant suffixes (_armed, _bands, _seeded) so variants
+// cluster under the base family name.
+function strategyFamily(strategyId) {
+  let f = (strategyId || '').replace(/_\d+$/, '');
+  const variantSuffixes = ['_armed', '_bands', '_seeded', '_full', '_trigger'];
+  for (const s of variantSuffixes) {
+    if (f.endsWith(s)) return f.slice(0, -s.length);
+  }
+  return f;
+}
+
+// Pretty family names for the labels
+const FAMILY_LABELS = {
+  'fixed_stop':         'Fixed stop',
+  'trailing_pct':       'Trailing %',
+  'trailing_dollar':    'Trailing $',
+  'profit_lock':        'Profit-lock',
+  'break_even':         'Break-even',
+  'r_multiple':         'R-Multiple',
+  'time_decay':         'Time-decay',
+  'atr_stop':           'ATR',
+  'multi_stage_lock':   'Multi-stage',
+  'partial_exit_scale': 'Partial exit',
+  'vwap_stop':          'VWAP',
+  'tsm_stddev':         'TSM StdDev',
+  'tsm_atr':            'TSM ATR',
+  'tsm_devstop':        'TSM DevStop',
+  'tsm_volspike':       'TSM Vol spike',
+  'tsm_bollinger':      'TSM Bollinger',
+};
+
 // Per-contract visibility filter — strategy ID → bool (only false hides)
 let strategyFilter = {};
 
@@ -88,13 +193,22 @@ function setChipState(contractId, strategyId, on) {
   if (chip) chip.classList.toggle('off', !on);
 }
 
+// Find ALL dataset indices belonging to a strategy (primary + extras)
+function findStrategyDatasets(chart, strategyId) {
+  const out = [];
+  chart.data.datasets.forEach((d, i) => {
+    if (d.strategyId === strategyId) out.push(i);
+  });
+  return out;
+}
+
 function setStrategyVisible(contractId, strategyName, strategyId, visible) {
   const chart = findChartForContract(contractId);
   if (!chart) return;
-  // Find the matching dataset by label
-  const dsIdx = chart.data.datasets.findIndex(d => d.label === strategyName);
-  if (dsIdx === -1) return;
-  chart.setDatasetVisibility(dsIdx, visible);
+  // Toggle every dataset (primary + extras) that belongs to this strategy
+  findStrategyDatasets(chart, strategyId).forEach(idx => {
+    chart.setDatasetVisibility(idx, visible);
+  });
   setChipState(contractId, strategyId, visible);
 }
 
@@ -109,18 +223,18 @@ function onChipClick(e, contractId, strategyIdx, strategyId) {
     clearTimeout(_chipClickTimers[key]);
     _chipClickTimers[key] = null;
   }
-  const chipEl = e.currentTarget;
   _chipClickTimers[key] = setTimeout(() => {
     _chipClickTimers[key] = null;
     const chart = findChartForContract(contractId);
     if (!chart) return;
-    const name = chipEl.querySelector('.chip-name').textContent;
-    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
-    if (dsIdx === -1) return;
-    const isVisible = chart.isDatasetVisible(dsIdx);
-    chart.setDatasetVisibility(dsIdx, !isVisible);
+    const idxList = findStrategyDatasets(chart, strategyId);
+    if (!idxList.length) return;
+    // Toggle based on primary dataset's current visibility
+    const primaryIdx = idxList.find(i => chart.data.datasets[i].isPrimary) ?? idxList[0];
+    const willShow = !chart.isDatasetVisible(primaryIdx);
+    idxList.forEach(i => chart.setDatasetVisibility(i, willShow));
     chart.update();
-    setChipState(contractId, strategyId, !isVisible);
+    setChipState(contractId, strategyId, willShow);
   }, 200);
 }
 
@@ -142,13 +256,116 @@ function soloStrategy(contractId, strategyId) {
 
   // strategyId === null means "show all"
   chips.forEach(chip => {
-    const sid  = chip.getAttribute('data-strategy');
-    const name = chip.querySelector('.chip-name').textContent;
-    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
-    if (dsIdx === -1) return;
+    const sid = chip.getAttribute('data-strategy');
     const visible = strategyId === null || sid === strategyId;
-    chart.setDatasetVisibility(dsIdx, visible);
+    findStrategyDatasets(chart, sid).forEach(idx => {
+      chart.setDatasetVisibility(idx, visible);
+    });
     chip.classList.toggle('off', !visible);
+  });
+  chart.update();
+}
+
+// Render chip wall grouped by strategy family.
+// Strategies sharing a family (e.g. all trailing_pct_* variants) are
+// visually clustered with a clickable family label.
+function renderChipFamilies(contractId, strategies) {
+  // Preserve original index for color stability
+  const indexed = strategies.map((r, si) => ({ ...r, _si: si }));
+  // Group by family, preserve first-appearance order
+  const groups = {};
+  const order  = [];
+  indexed.forEach(r => {
+    const fam = strategyFamily(r.strategyId);
+    if (!groups[fam]) { groups[fam] = []; order.push(fam); }
+    groups[fam].push(r);
+  });
+
+  return order.map(fam => {
+    const label = FAMILY_LABELS[fam] || fam.replace(/_/g, ' ');
+    const items = groups[fam];
+    const chips = items.map(r => {
+      const col = COLORS[r._si % COLORS.length];
+      return `
+        <label class="strategy-chip off" data-strategy="${r.strategyId}" data-contract="${contractId}"
+               data-family="${fam}" data-pnl="${r.pnl}" data-reason="${r.exitReason}"
+               style="--chip-color:${col}"
+               onclick="onChipClick(event, '${contractId}', ${r._si}, '${r.strategyId}')"
+               ondblclick="onChipDblClick(event, '${contractId}', ${r._si}, '${r.strategyId}')">
+          <span class="chip-dot" style="background:${col}"></span>
+          <span class="chip-name">${r.strategyName}</span>
+          <span class="chip-pnl ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmtDollars(r.pnl)}</span>
+        </label>`;
+    }).join('');
+
+    return `
+      <div class="chip-family" data-contract="${contractId}" data-family="${fam}">
+        <span class="family-label" onclick="toggleFamily('${contractId}', '${fam}')">
+          ${label}<span class="family-count">${items.length}</span>
+        </span>
+        <div class="chip-family-row">${chips}</div>
+      </div>`;
+  }).join('');
+}
+
+// Apply chip filters (winners/losers/eod) for a contract.
+// Hides matching chips AND hides their chart lines.
+function applyChipFilters(contractId) {
+  const showWin  = document.getElementById(`${contractId}_f_win`).checked;
+  const showLoss = document.getElementById(`${contractId}_f_loss`).checked;
+  const showEod  = document.getElementById(`${contractId}_f_eod`).checked;
+  const chart    = findChartForContract(contractId);
+
+  document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`).forEach(chip => {
+    const sid    = chip.getAttribute('data-strategy');
+    const pnl    = parseFloat(chip.getAttribute('data-pnl') || '0');
+    const reason = chip.getAttribute('data-reason') || '';
+
+    const isWin  = pnl > 0;
+    const isLoss = pnl < 0;
+    const isEod  = reason === 'eod';
+
+    let visible = true;
+    if (isWin  && !showWin)  visible = false;
+    if (isLoss && !showLoss) visible = false;
+    if (isEod  && !showEod)  visible = false;
+
+    chip.style.display = visible ? '' : 'none';
+    // Hide chart lines for filtered-out chips
+    if (!visible && chart) {
+      findStrategyDatasets(chart, sid).forEach(idx => chart.setDatasetVisibility(idx, false));
+      chip.classList.add('off');
+    }
+  });
+
+  // Hide family wrappers whose chips are all hidden
+  document.querySelectorAll(`.chip-family[data-contract="${contractId}"]`).forEach(fam => {
+    const anyVisible = Array.from(
+      fam.querySelectorAll('.strategy-chip')
+    ).some(c => c.style.display !== 'none');
+    fam.style.display = anyVisible ? '' : 'none';
+  });
+
+  if (chart) chart.update();
+}
+
+// Toggle every chip in a family on/off together.
+function toggleFamily(contractId, family) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+  const chips = document.querySelectorAll(
+    `.strategy-chip[data-contract="${contractId}"][data-family="${family}"]`
+  );
+  // Decide direction based on the first VISIBLE chip's state
+  const firstVisible = Array.from(chips).find(c => c.style.display !== 'none');
+  if (!firstVisible) return;
+  const willShow = firstVisible.classList.contains('off');
+
+  chips.forEach(chip => {
+    if (chip.style.display === 'none') return;
+    const sid = chip.getAttribute('data-strategy');
+    findStrategyDatasets(chart, sid).forEach(idx => chart.setDatasetVisibility(idx, willShow));
+    chip.classList.toggle('off', !willShow);
   });
   chart.update();
 }
@@ -158,10 +375,10 @@ function toggleAllStrategies(contractId, visible) {
   if (!chart) return;
   const chips = document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`);
   chips.forEach(chip => {
-    const name = chip.querySelector('.chip-name').textContent;
-    const dsIdx = chart.data.datasets.findIndex(d => d.label === name);
-    if (dsIdx === -1) return;
-    chart.setDatasetVisibility(dsIdx, visible);
+    const sid = chip.getAttribute('data-strategy');
+    findStrategyDatasets(chart, sid).forEach(idx => {
+      chart.setDatasetVisibility(idx, visible);
+    });
     chip.classList.toggle('off', !visible);
   });
   chart.update();
@@ -222,24 +439,18 @@ function renderContractBlock(c, idx) {
 
       <!-- Strategy toggle bar (all OFF by default — click to show) -->
       <div class="strategy-toggles" id="${id}_toggles">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Strategies:</span>
           <button class="toggle-btn-mini" onclick="toggleAllStrategies('${id}', true)">All</button>
           <button class="toggle-btn-mini" onclick="toggleAllStrategies('${id}', false)">None</button>
-          <span style="font-size:11px;color:var(--text-muted);margin-left:8px">click to show &middot; double-click to solo</span>
+          <span style="display:inline-block;width:1px;height:14px;background:var(--border);margin:0 4px"></span>
+          <span style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filter:</span>
+          <label class="filter-pill pos"><input type="checkbox" id="${id}_f_win"  checked onchange="applyChipFilters('${id}')"> Winners</label>
+          <label class="filter-pill neg"><input type="checkbox" id="${id}_f_loss" checked onchange="applyChipFilters('${id}')"> Losers</label>
+          <label class="filter-pill"    ><input type="checkbox" id="${id}_f_eod"  checked onchange="applyChipFilters('${id}')"> EOD-held</label>
+          <span style="font-size:11px;color:var(--text-muted);margin-left:auto">click chip to show &middot; double-click to solo &middot; click family name to toggle group</span>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">
-          ${strategies.map((r, si) => `
-            <label class="strategy-chip off" data-strategy="${r.strategyId}" data-contract="${id}"
-                   style="--chip-color:${COLORS[si % COLORS.length]}"
-                   onclick="onChipClick(event, '${id}', ${si}, '${r.strategyId}')"
-                   ondblclick="onChipDblClick(event, '${id}', ${si}, '${r.strategyId}')">
-              <span class="chip-dot" style="background:${COLORS[si % COLORS.length]}"></span>
-              <span class="chip-name">${r.strategyName}</span>
-              <span class="chip-pnl ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmtDollars(r.pnl)}</span>
-            </label>
-          `).join('')}
-        </div>
+        ${renderChipFamilies(id, strategies)}
       </div>
 
       <!-- Price + stop level chart -->
@@ -388,6 +599,40 @@ function buildChart(c, idx) {
       tension: 0.1,
       spanGaps: true,
       order: 2 + si,
+      // Custom metadata for chip-toggle linking:
+      strategyId:   strat.strategyId,
+      isPrimary:    true,
+    });
+
+    // ─── Extra traces (multi-level visualization) ──────────────
+    // Each strategy can return an `extraTraces` dict. We render each
+    // extra in a tinted version of the strategy's color based on its
+    // semantic role: red-tinted for safety nets (hard stops, lower
+    // bands), green-tinted for upside targets (profit targets, upper
+    // bands, break-even). Same hue family per strategy, different
+    // shade per function. The eye reads role at a glance.
+    const extras = strat.extraTraces || {};
+    Object.entries(extras).forEach(([traceName, traceData]) => {
+      const extraData = new Array(bars.length).fill(null);
+      (traceData || []).forEach(t => {
+        const bi = timeIdx[t.time];
+        if (bi !== undefined) extraData[bi] = t.stopPrice;
+      });
+      const extraColor = extraColorForRole(color, traceName);
+      datasets.push({
+        label: `${strat.strategyName} · ${traceName}`,
+        data: extraData,
+        borderColor: extraColor,
+        backgroundColor: 'transparent',
+        pointRadius: 0,
+        borderWidth: isDense ? 0.9 : 1.3,
+        borderDash: [1, 4],  // tight dotted — visually subordinate to primary's dashed
+        tension: 0.1,
+        spanGaps: true,
+        order: 5 + si,       // render UNDER primary
+        strategyId:   strat.strategyId,
+        isPrimary:    false,
+      });
     });
   });
 
@@ -405,8 +650,10 @@ function buildChart(c, idx) {
         const isEarlyExit = exitIdx < bars.length * 0.25;
         if (!labelAll && !isEarlyExit) return;
 
-        // Find the dataset index for this strategy
-        const dsIdx = chart.data.datasets.findIndex(d => d.label === strat.strategyName);
+        // Find the PRIMARY dataset index for this strategy (skip extras)
+        const dsIdx = chart.data.datasets.findIndex(
+          d => d.strategyId === strat.strategyId && d.isPrimary
+        );
         if (dsIdx === -1) return;
         if (!chart.isDatasetVisible(dsIdx)) return;
 
@@ -466,7 +713,14 @@ function buildChart(c, idx) {
             boxWidth: 14,
             boxHeight: 8,
             padding: 8,
-            filter: item => !['High', 'Low', 'Entry price'].includes(item.text),
+            // Hide top-chart axis annotations AND extra traces from the
+            // legend (the chips below control extras; legend stays clean).
+            filter: (item, data) => {
+              if (['High', 'Low', 'Entry price'].includes(item.text)) return false;
+              const ds = data.datasets[item.datasetIndex];
+              if (ds && ds.strategyId && ds.isPrimary === false) return false;
+              return true;
+            },
           },
           onClick: (e, legendItem, legend) => {
             // Toggle dataset visibility (built-in but make sure it stays)
@@ -526,10 +780,11 @@ function buildChart(c, idx) {
     },
   });
 
-  // Hide every strategy stop line by default — user clicks chips to reveal
+  // Hide every strategy stop line (primary + extras) by default —
+  // user clicks chips to reveal. Detection is now by strategyId tag
+  // (not by label), so it covers extras too.
   chart.data.datasets.forEach((ds, idx) => {
-    // Keep the price line visible; hide everything else (strategy stops)
-    if (ds.label !== 'Premium (close)' && ds.label !== 'High' && ds.label !== 'Low' && ds.label !== 'Entry price') {
+    if (ds.strategyId !== undefined) {
       chart.setDatasetVisibility(idx, false);
     }
   });
@@ -539,11 +794,229 @@ function buildChart(c, idx) {
 }
 
 
+// ── Aggregate stats across all contracts ───────────
+
+// Group per-contract strategy results by strategyId and compute stats
+function computeAggregates(contracts) {
+  const byId = {};
+  contracts.forEach(c => {
+    (c.strategies || []).forEach(s => {
+      if (!byId[s.strategyId]) {
+        byId[s.strategyId] = {
+          id:     s.strategyId,
+          name:   s.strategyName,
+          pnls:   [],
+          reasons: {},
+          holdMins: [],
+        };
+      }
+      const entry = byId[s.strategyId];
+      entry.pnls.push(s.pnl);
+      entry.reasons[s.exitReason] = (entry.reasons[s.exitReason] || 0) + 1;
+      // Hold time in minutes
+      if (s.entryTs && s.exitTs) {
+        const t1 = new Date(s.entryTs.replace(' ', 'T'));
+        const t2 = new Date(s.exitTs.replace(' ', 'T'));
+        if (!isNaN(t1) && !isNaN(t2)) {
+          entry.holdMins.push((t2 - t1) / 60000);
+        }
+      }
+    });
+  });
+
+  // Compute stats per strategy
+  return Object.values(byId).map(e => {
+    const n = e.pnls.length;
+    const sorted = [...e.pnls].sort((a, b) => a - b);
+    const total = e.pnls.reduce((s, v) => s + v, 0);
+    const avg = total / n;
+    const median = n % 2 ? sorted[(n - 1) / 2] : (sorted[n/2 - 1] + sorted[n/2]) / 2;
+    const best = Math.max(...e.pnls);
+    const worst = Math.min(...e.pnls);
+    const wins = e.pnls.filter(v => v > 0).length;
+    const winRate = wins / n * 100;
+    // Standard deviation
+    const variance = e.pnls.reduce((s, v) => s + (v - avg) ** 2, 0) / Math.max(1, n - 1);
+    const stddev = Math.sqrt(variance);
+    const sharpe = stddev > 0 ? avg / stddev : 0;
+    // Profit factor
+    const gains  = e.pnls.filter(v => v > 0).reduce((s, v) => s + v, 0);
+    const losses = Math.abs(e.pnls.filter(v => v < 0).reduce((s, v) => s + v, 0));
+    const profitFactor = losses > 0 ? gains / losses : (gains > 0 ? Infinity : 0);
+    // Avg hold
+    const avgHold = e.holdMins.length
+      ? e.holdMins.reduce((s, v) => s + v, 0) / e.holdMins.length
+      : 0;
+
+    return {
+      id: e.id, name: e.name,
+      trades: n, wins, winRate, total, avg, median, best, worst,
+      stddev, sharpe, profitFactor, avgHold,
+      reasons: e.reasons,
+    };
+  });
+}
+
+// Sort state (persisted across renders)
+let aggSortKey = 'total';
+let aggSortDir = -1;  // -1 = desc, 1 = asc
+
+function renderAggregateStats(contracts) {
+  const stats = computeAggregates(contracts);
+  if (!stats.length) return;
+
+  stats.sort((a, b) => {
+    const va = a[aggSortKey] ?? 0;
+    const vb = b[aggSortKey] ?? 0;
+    if (aggSortKey === 'name') return aggSortDir * va.localeCompare(vb);
+    return aggSortDir * (va - vb);
+  });
+
+  // Leaderboards
+  const byTotal  = [...stats].sort((a, b) => b.total - a.total);
+  const byWin    = [...stats].sort((a, b) => b.winRate - a.winRate);
+  const bySharpe = [...stats].sort((a, b) => b.sharpe - a.sharpe);
+
+  const top3    = arr => arr.slice(0, 3);
+  const bottom3 = arr => arr.slice(-3).reverse();
+
+  const fmtAvg = s => s.avgHold >= 60
+    ? `${Math.floor(s.avgHold / 60)}h ${Math.round(s.avgHold % 60)}m`
+    : `${Math.round(s.avgHold)}m`;
+
+  const fmtPF = v => v === Infinity ? '∞' : v.toFixed(2);
+
+  const arrow = k => aggSortKey === k ? (aggSortDir < 0 ? ' ▼' : ' ▲') : '';
+  const clickable = (k, label) =>
+    `<th class="sortable" onclick="sortAgg('${k}')">${label}${arrow(k)}</th>`;
+
+  // Exit reason mini-bar
+  const reasonBar = r => {
+    const total = Object.values(r).reduce((s, v) => s + v, 0);
+    if (!total) return '';
+    const colors = { hard_stop: '#e24b4a', trailing_stop: '#1d9e75', eod: '#6c8cff',
+                     break_even_stop: '#e5a843', r_step_stop: '#a855f7', expiry: '#888' };
+    const order = ['hard_stop','trailing_stop','break_even_stop','r_step_stop','eod','expiry'];
+    const segs = order.filter(k => r[k]).map(k => {
+      const pct = r[k] / total * 100;
+      return `<span title="${k}: ${r[k]}" style="display:inline-block;height:8px;width:${pct}%;background:${colors[k]||'#666'}"></span>`;
+    }).join('');
+    return `<div style="display:flex;height:8px;width:80px;border-radius:2px;overflow:hidden;background:#222">${segs}</div>`;
+  };
+
+  // Leaderboard entry
+  const leaderRow = (s, i) => `
+    <div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;font-size:11px;border-bottom:1px solid var(--border)">
+      <span style="color:var(--text-muted);width:14px">${i + 1}.</span>
+      <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</span>
+      <span class="${s.total >= 0 ? 'pos' : 'neg'}" style="font-family:var(--font-mono);font-weight:600">
+  `;
+  const leaderValTotal   = s => `${s.total >= 0 ? '+$' : '-$'}${Math.abs(s.total).toFixed(0)}</span></div>`;
+  const leaderValWin     = s => `${s.winRate.toFixed(0)}%</span></div>`;
+  const leaderValSharpe  = s => `${s.sharpe.toFixed(2)}</span></div>`;
+
+  const html = `
+    <div class="card" style="margin-top:16px">
+      <div class="section-label">Leaderboards — top &amp; bottom 3</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
+        <div>
+          <div style="font-size:11px;color:var(--text-secondary);font-weight:600;margin-bottom:4px">TOTAL P&amp;L</div>
+          ${top3(byTotal).map((s, i) => leaderRow(s, i) + leaderValTotal(s)).join('')}
+          <div style="color:var(--text-muted);font-size:10px;margin-top:6px;margin-bottom:4px">BOTTOM 3</div>
+          ${bottom3(byTotal).map((s, i) => leaderRow(s, stats.length - 3 + i) + leaderValTotal(s)).join('')}
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-secondary);font-weight:600;margin-bottom:4px">WIN RATE</div>
+          ${top3(byWin).map((s, i) => leaderRow(s, i) + leaderValWin(s)).join('')}
+          <div style="color:var(--text-muted);font-size:10px;margin-top:6px;margin-bottom:4px">BOTTOM 3</div>
+          ${bottom3(byWin).map((s, i) => leaderRow(s, stats.length - 3 + i) + leaderValWin(s)).join('')}
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-secondary);font-weight:600;margin-bottom:4px">SHARPE (AVG / STDEV)</div>
+          ${top3(bySharpe).map((s, i) => leaderRow(s, i) + leaderValSharpe(s)).join('')}
+          <div style="color:var(--text-muted);font-size:10px;margin-top:6px;margin-bottom:4px">BOTTOM 3</div>
+          ${bottom3(bySharpe).map((s, i) => leaderRow(s, stats.length - 3 + i) + leaderValSharpe(s)).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-label">Aggregate stats — ${stats.length} strategies × ${contracts.length} contracts</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              ${clickable('name', 'Strategy')}
+              ${clickable('trades', 'Trades')}
+              ${clickable('winRate', 'Win %')}
+              ${clickable('total', 'Total P&L')}
+              ${clickable('avg', 'Avg')}
+              ${clickable('median', 'Median')}
+              ${clickable('best', 'Best')}
+              ${clickable('worst', 'Worst')}
+              ${clickable('stddev', 'StdDev')}
+              ${clickable('sharpe', 'Sharpe')}
+              ${clickable('profitFactor', 'PF')}
+              ${clickable('avgHold', 'Hold')}
+              <th>Exit reasons</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stats.map(s => `
+              <tr>
+                <td style="font-weight:500;white-space:nowrap">${s.name}</td>
+                <td>${s.trades}</td>
+                <td>${s.winRate.toFixed(0)}%</td>
+                <td class="${s.total >= 0 ? 'pos' : 'neg'}" style="font-family:var(--font-mono);font-weight:600">${fmtDollars(s.total)}</td>
+                <td class="${s.avg >= 0 ? 'pos' : 'neg'}" style="font-family:var(--font-mono)">${fmtDollars(s.avg)}</td>
+                <td class="${s.median >= 0 ? 'pos' : 'neg'}" style="font-family:var(--font-mono)">${fmtDollars(s.median)}</td>
+                <td class="pos" style="font-family:var(--font-mono)">${fmtDollars(s.best)}</td>
+                <td class="neg" style="font-family:var(--font-mono)">${fmtDollars(s.worst)}</td>
+                <td style="font-family:var(--font-mono)">$${s.stddev.toFixed(1)}</td>
+                <td style="font-family:var(--font-mono)">${s.sharpe.toFixed(2)}</td>
+                <td style="font-family:var(--font-mono)">${fmtPF(s.profitFactor)}</td>
+                <td style="white-space:nowrap">${fmtAvg(s)}</td>
+                <td>${reasonBar(s.reasons)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px;font-size:10px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap">
+        <span><span style="display:inline-block;width:10px;height:8px;background:#e24b4a"></span> hard stop</span>
+        <span><span style="display:inline-block;width:10px;height:8px;background:#1d9e75"></span> trailing stop</span>
+        <span><span style="display:inline-block;width:10px;height:8px;background:#e5a843"></span> break-even</span>
+        <span><span style="display:inline-block;width:10px;height:8px;background:#a855f7"></span> R-step</span>
+        <span><span style="display:inline-block;width:10px;height:8px;background:#6c8cff"></span> EOD</span>
+        <span><span style="display:inline-block;width:10px;height:8px;background:#888"></span> expiry</span>
+        <span style="margin-left:auto">Click column headers to sort. Sharpe = avg ÷ stdDev. PF = gross wins ÷ |gross losses|.</span>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('aggregateResults').innerHTML = html;
+}
+
+// Cached so sort clicks can re-render without re-fetching
+let lastContracts = null;
+
+function sortAgg(key) {
+  if (aggSortKey === key) {
+    aggSortDir = -aggSortDir;
+  } else {
+    aggSortKey = key;
+    aggSortDir = key === 'name' ? 1 : -1;
+  }
+  if (lastContracts) renderAggregateStats(lastContracts);
+}
+
+
 // ── Run backtest ───────────────────────────
 async function runBacktest() {
   showError('');
   document.getElementById('logBox').textContent = '';
   document.getElementById('contractResults').innerHTML = '';
+  document.getElementById('aggregateResults').innerHTML = '';
   document.getElementById('logCard').classList.add('hidden');
 
   // Destroy old charts
@@ -598,6 +1071,10 @@ async function runBacktest() {
     if (maxStrategies > COLORS.length) {
       COLORS = generateColors(maxStrategies + 16);
     }
+
+    // Cache for sort handler, render aggregate stats first
+    lastContracts = contracts;
+    renderAggregateStats(contracts);
 
     // Render each contract block
     const container = document.getElementById('contractResults');

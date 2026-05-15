@@ -14,7 +14,7 @@
 # ============================================================
 
 import math
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 
 META = {
     'enabled':     True,
@@ -83,7 +83,7 @@ def execute(bars, entry_idx, entry_price, params):
             return {'exitBar': bar, 'exitReason': 'trailing_stop', 'stopPrice': stop_price,
                     'highWaterMark': high_price, 'stopTrace': trace}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price,
                     'highWaterMark': high_price, 'stopTrace': trace}
 

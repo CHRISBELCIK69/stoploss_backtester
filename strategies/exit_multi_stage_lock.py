@@ -12,7 +12,7 @@
 #   back more than one stage worth of gains.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit, append_trace
 from data_provider  import fetch_daily_bars
 
 META = {
@@ -87,6 +87,12 @@ def execute(bars, entry_idx, entry_price, params):
     stage           = 0
     high_water_mark = entry_price
     trace           = []
+    extras          = {}
+
+    # Pre-computed level constants for visualization
+    hard_stop_initial = stop_price       # ATR-based starting stop
+    level_be          = entry_price      # stage 1 target
+    level_lock        = stage2_lock      # stage 2 target
 
     for i in range(entry_idx + 1, len(bars)):
         bar      = bars[i]
@@ -119,6 +125,11 @@ def execute(bars, entry_idx, entry_price, params):
                 stop_price = new_trail
 
         trace.append({'time': bar['time'], 'stopPrice': stop_price})
+        # Extras: show the staircase of stage targets + initial hard stop
+        append_trace(extras, 'Initial ATR stop', bar, hard_stop_initial)
+        append_trace(extras, 'Stage 1 (BE)',     bar, level_be)
+        append_trace(extras, 'Stage 2 (lock)',   bar, level_lock)
+        append_trace(extras, 'Stage 3 target',   bar, stage3_target)
 
         # ── Stop check (skip if stage just advanced this bar) ──
         if stage == was_stage:
@@ -127,18 +138,18 @@ def execute(bars, entry_idx, entry_price, params):
             if bar_open <= stop_price:
                 return {'exitBar': bar, 'exitReason': reason, 'stopPrice': bar_open,
                         'highWaterMark': high_water_mark, 'stage': stage,
-                        'atr': round(atr, 4), 'stopTrace': trace}
+                        'atr': round(atr, 4), 'stopTrace': trace, 'extraTraces': extras}
 
             if bar_low <= stop_price:
                 return {'exitBar': bar, 'exitReason': reason, 'stopPrice': stop_price,
                         'highWaterMark': high_water_mark, 'stage': stage,
-                        'atr': round(atr, 4), 'stopTrace': trace}
+                        'atr': round(atr, 4), 'stopTrace': trace, 'extraTraces': extras}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price,
                     'highWaterMark': high_water_mark, 'stage': stage,
-                    'atr': round(atr, 4), 'stopTrace': trace}
+                    'atr': round(atr, 4), 'stopTrace': trace, 'extraTraces': extras}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': stop_price,
             'highWaterMark': high_water_mark, 'stage': stage,
-            'atr': round(atr, 4), 'stopTrace': trace}
+            'atr': round(atr, 4), 'stopTrace': trace, 'extraTraces': extras}

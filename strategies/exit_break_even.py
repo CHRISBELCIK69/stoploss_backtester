@@ -14,7 +14,7 @@
 #   Common 0DTE play: "once I'm up 30%, move stop to entry."
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit, append_trace
 
 META = {
     'enabled':     True,
@@ -51,10 +51,12 @@ def execute(bars, entry_idx, entry_price, params):
 
     high_water_mark   = entry_price
     break_even_active = False
-    stop_price        = entry_price * (1 - hard_stop_pct / 100)
+    hard_stop         = entry_price * (1 - hard_stop_pct / 100)
+    stop_price        = hard_stop
     activation_target = entry_price * (1 + activation_pct / 100)
 
-    trace = []
+    trace  = []
+    extras = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar      = bars[i]
@@ -78,6 +80,10 @@ def execute(bars, entry_idx, entry_price, params):
                 stop_price = new_stop
 
         trace.append({'time': bar['time'], 'stopPrice': stop_price})
+        # Extras: hard stop (safety net), break-even line (entry), activation target
+        append_trace(extras, 'Hard stop',         bar, hard_stop)
+        append_trace(extras, 'Break-even',        bar, entry_price)
+        append_trace(extras, 'Activation target', bar, activation_target)
 
         # Only check stop if BE was already active before this bar,
         # OR if we're still in the hard-stop phase
@@ -87,16 +93,16 @@ def execute(bars, entry_idx, entry_price, params):
             if bar_open <= stop_price:
                 return {
                     'exitBar': bar, 'exitReason': reason,
-                    'stopPrice': bar_open, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace,
+                    'stopPrice': bar_open, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace, 'extraTraces': extras,
                 }
 
             if bar_low <= stop_price:
                 return {
                     'exitBar': bar, 'exitReason': reason,
-                    'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace,
+                    'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace, 'extraTraces': extras,
                 }
 
-        if bar_mins >= to_minutes(eod_time):
-            return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace}
+        if should_eod_exit(bar, params):
+            return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace, 'extraTraces': extras}
 
-    return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace}
+    return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'breakEvenActive': break_even_active, 'stopTrace': trace, 'extraTraces': extras}

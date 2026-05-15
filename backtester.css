@@ -212,8 +212,88 @@ textarea {
   border-color: var(--accent);
 }
 
+/* ── Filter pills (winners / losers / EOD) ──────────── */
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 3px 9px 3px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.12s ease;
+}
+.filter-pill input[type="checkbox"] {
+  margin: 0;
+  width: 11px;
+  height: 11px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.filter-pill:hover { background: var(--bg-hover); color: var(--text); }
+.filter-pill.pos input[type="checkbox"] { accent-color: var(--green); }
+.filter-pill.neg input[type="checkbox"] { accent-color: var(--red); }
+.filter-pill:has(input:not(:checked)) { opacity: 0.45; border-style: dashed; }
+
+/* ── Chip family grouping ──────────────────────── */
+.chip-family {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 6px;
+  padding: 4px 0;
+}
+.family-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 110px;
+  max-width: 110px;
+  padding: 5px 8px 5px 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  border-right: 1px solid var(--border);
+  transition: color 0.12s ease;
+}
+.family-label:hover { color: var(--accent); }
+.family-count {
+  display: inline-block;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  margin-left: auto;
+  font-weight: 500;
+}
+.chip-family-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
 /* ── Tables ───────────────────────────────── */
 .tbl-wrap { overflow-x: auto; }
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover {
+  color: var(--accent);
+}
 
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th {

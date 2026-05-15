@@ -81,6 +81,9 @@ def run_backtest():
             # Inject context for strategies that need external data (e.g. ATR)
             params['_contract'] = contract
             params['_config']   = CONFIG
+            # Inject global eodMode from CONFIG so the should_eod_exit
+            # helper picks it up consistently across all strategies.
+            params.setdefault('eodMode', CONFIG.get('defaults', {}).get('eodMode', 'daily'))
 
             err = strategy.validate(params)
             if err:
@@ -89,11 +92,14 @@ def run_backtest():
 
             result = process_contract(contract, bars, strategy, params, qty, log_fn=log)
             if result:
-                # Extract stop trace before it gets stripped
-                stop_trace = result.pop('stopTrace', [])
+                # Extract trace structures (they'd otherwise be passed through
+                # but it's explicit + safer to surface them as known fields)
+                stop_trace   = result.pop('stopTrace', [])
+                extra_traces = result.pop('extraTraces', {})
                 strategy_results.append({
                     **result,
-                    'stopTrace': stop_trace,
+                    'stopTrace':   stop_trace,
+                    'extraTraces': extra_traces,
                 })
 
         contract_results.append({

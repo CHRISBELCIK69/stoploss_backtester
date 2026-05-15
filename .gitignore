@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
-config.py
+
+# Local-only files
+.env
+*.local.py

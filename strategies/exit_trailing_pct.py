@@ -10,7 +10,7 @@
 #   Best for: catching big runners while protecting against reversals.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 
 META = {
     'enabled':     True,
@@ -67,7 +67,7 @@ def execute(bars, entry_idx, entry_price, params):
         if bar_low <= stop_price:
             return {'exitBar': bar, 'exitReason': 'trailing_stop', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'stopTrace': trace}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'stopTrace': trace}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'stopTrace': trace}

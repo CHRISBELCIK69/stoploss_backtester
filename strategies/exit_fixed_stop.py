@@ -10,16 +10,16 @@
 #   Good baseline, but gives back all gains on a runner.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 
 META = {
-    'enabled':     True,
+    'enabled':     False,
     'id':          'fixed_stop',
     'name':        'Fixed stop loss',
     'description': 'Exit when price drops a fixed % below entry. Stop never moves. '
                    'Simple downside protection but gives back all gains on a winning trade.',
     'params': [
-        {'key': 'hardStopPct', 'label': 'Stop loss (%)',    'default': 50,      'min': 1,   'max': 100, 'step': 1,
+        {'key': 'hardStopPct', 'label': 'Stop loss (%)',    'default': 25,      'min': 1,   'max': 100, 'step': 1,
          'hint': 'e.g. 50 = exit when price falls 50% below entry price'},
         {'key': 'eodTime',     'label': 'EOD exit (CST)',   'default': '15:45', 'type': 'time'},
     ],
@@ -54,7 +54,7 @@ def execute(bars, entry_idx, entry_price, params):
         if bar_low <= stop_price:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': stop_price, 'highWaterMark': entry_price, 'stopTrace': trace}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price, 'highWaterMark': entry_price, 'stopTrace': trace}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': stop_price, 'highWaterMark': entry_price, 'stopTrace': trace}

@@ -15,7 +15,7 @@
 #   as the day goes on, creating a narrowing channel.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 
 META = {
     'enabled':     True,
@@ -91,7 +91,7 @@ def execute(bars, entry_idx, entry_price, params):
                 'trailPctAtExit': round(current_trail_pct, 1), 'dayProgressPct': round(day_progress * 100), 'stopTrace': trace,
             }
 
-        if bar_mins >= eod_mins:
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price, 'highWaterMark': high_water_mark, 'stopTrace': trace}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry', 'stopPrice': None, 'highWaterMark': high_water_mark, 'stopTrace': trace}

@@ -13,7 +13,7 @@
 #   flipped. Polygon includes VWAP in every minute bar.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 from data_provider  import fetch_daily_bars
 
 META = {
@@ -147,7 +147,7 @@ def execute(bars, entry_idx, entry_price, params):
                         'highWaterMark': high_water_mark, 'phase2Active': False,
                         'atr': round(atr, 4), 'stopTrace': trace}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': stop_price,
                     'highWaterMark': high_water_mark, 'phase2Active': phase2_active,
                     'atr': round(atr, 4), 'stopTrace': trace}

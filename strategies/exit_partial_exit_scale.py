@@ -13,7 +13,7 @@
 #   to exit. Stop trace shows tranche 3's trail (the live runner).
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit, append_trace
 from data_provider  import fetch_daily_bars
 
 META = {
@@ -84,7 +84,8 @@ def execute(bars, entry_idx, entry_price, params):
 
     high_water_mark = entry_price
     trail_stop      = max(hard_stop, floor_stop)
-    trace = []
+    trace  = []
+    extras = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar      = bars[i]
@@ -102,6 +103,10 @@ def execute(bars, entry_idx, entry_price, params):
             trail_stop = max(raw_trail, floor_stop)
 
         trace.append({'time': bar['time'], 'stopPrice': trail_stop})
+        # Extras: show all three tranche exit levels
+        append_trace(extras, 'T1 hard stop',   bar, hard_stop)
+        append_trace(extras, 'T2 break-even',  bar, entry_price)
+        append_trace(extras, 'T3 floor',       bar, floor_stop)
 
         # ── T1: hard stop ──
         if t1['exit_price'] is None:
@@ -125,7 +130,7 @@ def execute(bars, entry_idx, entry_price, params):
                 t3['exit_price'] = trail_stop;  t3['exit_bar'] = bar
 
         # ── EOD: close any open tranches ──
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             for tr in (t1, t2, t3):
                 if tr['exit_price'] is None:
                     tr['exit_price'] = float(bar['close'])
@@ -167,4 +172,5 @@ def execute(bars, entry_idx, entry_price, params):
         't3Exit':        round(t3['exit_price'], 4),
         'atr':           round(atr, 4),
         'stopTrace':     trace,
+        'extraTraces':   extras,
     }

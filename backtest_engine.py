@@ -21,6 +21,50 @@ def to_minutes(time_str):
     return int(h) * 60 + int(m)
 
 
+def append_trace(traces_dict, name, bar, price):
+    """
+    Helper for strategies that want to emit multiple stop traces.
+    Usage in a strategy:
+        extras = {}
+        ...
+        append_trace(extras, 'Hard stop', bar, hard_stop)
+        append_trace(extras, 'Floor',     bar, floor_stop)
+        return {..., 'extraTraces': extras}
+    """
+    if price is None:
+        return
+    traces_dict.setdefault(name, []).append({
+        'time': bar['time'],
+        'stopPrice': price,
+    })
+
+
+def should_eod_exit(bar, params):
+    """
+    Check if the EOD exit clause should fire on this bar.
+
+    Behavior controlled by params['eodMode']:
+      'daily'   — exit at eodTime EVERY day (current/legacy behavior, default).
+                  Correct for 0DTE contracts where entryDate == expiry.
+      'expiry'  — only exit at eodTime on the contract's expiry day.
+                  Holds positions overnight on multi-day swing trades.
+
+    Reads params['eodTime'] (default '15:45') and, for 'expiry' mode,
+    looks up the contract's expiry from params['_contract'].
+    """
+    eod_time = params.get('eodTime', '15:45')
+    bar_mins = to_minutes(bar['time'][11:16])
+    if bar_mins < to_minutes(eod_time):
+        return False
+
+    mode = params.get('eodMode', 'daily')
+    if mode == 'expiry':
+        expiry = (params.get('_contract') or {}).get('expiry', '')
+        bar_date = bar['time'][:10]
+        return bar_date == expiry
+    return True
+
+
 def find_entry_bar(bars, entry_date, entry_time_mins):
     """
     Find the first bar on entry_date at or after entry_time_mins.

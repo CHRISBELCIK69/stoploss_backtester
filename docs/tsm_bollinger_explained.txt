@@ -1,0 +1,252 @@
+TSM Bollinger Mean-Revert — Deep Dive
+======================================
+
+WHAT IT ACTUALLY DOES (AND WHAT IT DOESN'T)
+-------------------------------------------
+
+This is NOT a stop-loss in the traditional sense. It's a take-profit on
+mean reversion. The "stop" line that gets drawn on the chart is actually
+a moving average — a curve that the price will eventually cross back to.
+When it does, you're out.
+
+The hard stop at the bottom is a separate, conventional safety net. So
+there are really two exit conditions running in parallel:
+
+                                 ┌───────────────────────┐
+                                 │  Price runs up         │
+                                 │  ─────────────────►    │
+                                 │           │            │
+                                 │           ▼            │
+   ──────── 20-bar SMA ─── ──────── ←─ Exit when           │
+                                 │           price returns │
+                                 │           to MA         │
+   ............ Hard stop (50% below entry — never moves) │
+                                 │  Exit if catastrophe   │
+                                 └───────────────────────┘
+
+The strategy assumes you bought a directional move that's likely to
+mean-revert. The MA IS the trigger — when price comes back to its
+average, the move is exhausted and you cash out.
+
+
+THE THREE-PHASE LIFECYCLE
+-------------------------
+
+Every Bollinger trade has three distinct windows:
+
+PHASE 1: Warmup (bars 0 → warmupBars)
+
+Default warmup is 10 bars (~10 minutes). During this window:
+
+  - The hard stop is the only exit — your $0.50/$0.42 (50% below entry)
+    stop holds.
+  - The MA isn't computed at all as an exit trigger.
+  - The "stop line" displayed on the chart shows the hard stop, not the MA.
+
+This warmup exists for a critical reason: at bar 1, the option might
+still be near entry price, which is literally on the MA (the MA is
+roughly the average of all recent prices including your entry). Without
+warmup, the strategy would exit on bar 1 every single time. The 10-bar
+buffer gives the trade room to actually run before mean-reversion logic
+activates.
+
+PHASE 2: MA exit armed (bars warmupBars → end)
+
+Once the warmup is past, the strategy looks at every new bar and asks:
+
+    if bar_low <= ma:
+        fill = max(ma, bar_low)
+        return exit
+
+Two things happen on this check:
+
+  1. bar_low <= ma — the price has touched or crossed back down to the
+     MA from above. This is the mean-reversion signal.
+  2. fill = max(ma, bar_low) — your fill is the BETTER of the MA price
+     or the bar low. If the bar wicked through the MA but closed above
+     it, you fill at the MA. If the bar gapped through cleanly, you
+     fill at the bar low.
+
+This is the key behavior that distinguishes Bollinger from a normal stop:
+
+  - A normal stop fills you at the worse price (the stop level if
+    touched, or the gap-down open if gapped through).
+  - A Bollinger MA exit fills you at the better of the two — because
+    the MA is a take-profit target, not a danger zone. You want the
+    better fill on the way out.
+
+PHASE 3: Hard stop catastrophe (always active)
+
+Throughout both phases, the original hard stop sits at entry × 0.50
+(default). It never moves. Its only job is to catch the worst case
+where price collapses straight down without ever running up first — so
+the MA exit never gets a chance.
+
+If the trade goes immediately wrong, this is what saves you. If the
+trade runs up and then mean-reverts, the MA exit fires first and the
+hard stop is irrelevant.
+
+
+THE MA ITSELF
+-------------
+
+Every bar after entry, the strategy recomputes:
+
+    window_start = max(0, i - ma_period + 1)
+    window = [float(bars[j]['close']) for j in range(window_start, i + 1)]
+    ma = sum(window) / len(window) if window else entry_price
+
+A few subtle things going on:
+
+  - Closes only — opens/highs/lows aren't used. The MA is the average
+    of the last 20 closes.
+  - Rolling, not anchored — the window slides forward with each new
+    bar. The bar from 21 minutes ago drops out as the new bar comes in.
+  - Self-correcting — if the option price spikes up and stays elevated,
+    the MA gradually catches up to the new level. Your "exit price"
+    rises with the MA. So the longer you hold, the higher the floor
+    you're protecting.
+  - Falls through gracefully — if there are fewer than ma_period bars
+    available (entered late in the day), len(window) is just whatever
+    exists, and the MA is computed over what we have. No errors, no
+    warmup blocking.
+
+This is why Bollinger acts like a dynamic trail with memory:
+
+  - Early in the trade, the MA is dragged down by the entry price →
+    exit fires near entry → small profit.
+  - Mid-trade, after a sustained run, the MA has caught up → exit fires
+    further from entry → bigger profit.
+  - Late in the trade, if price has been chopping sideways at a high
+    level, MA = current price → the next dip exits immediately.
+
+
+WHY IT PERFORMS WELL ON SPY 0DTE
+--------------------------------
+
+In your earlier test on MRVL, Bollinger MR was the best winner at
++$21.80 — better than holding to EOD. Here's the structural reason:
+
+SPY 0DTE options have a very specific behavior:
+
+  1. Morning pop — directional move from open
+  2. Midday consolidation — sideways chop near the new level
+  3. Afternoon decay — theta accelerates, premium bleeds even if price
+     holds
+
+A strategy that exits on mean reversion captures the morning pop cleanly:
+
+  - Enter at open, ride the pop
+  - Price plateaus, MA catches up to current price
+  - First minor pullback in the consolidation hits the MA → exit before
+    theta kicks in
+
+Compare to Profit-lock with default 50% activation: the trade has to
+gain 50% before the trail even arms. By the time it arms, the morning
+pop is already exhausted, the MA strategy has already exited with
+profit, and Profit-lock then trails sideways into EOD eating theta.
+
+That's why on grindy chop days Bollinger consistently outperforms.
+
+
+WHERE IT DIES
+-------------
+
+Three failure modes:
+
+1. Trades that grind down all day with no run-up
+
+   If the contract drifts from $1.20 → $0.80 → $0.40 with no upside,
+   the MA tracks the price downward. bar_low <= ma becomes "is the bar
+   low below a continuously-falling average?" — usually yes. So you'd
+   exit early on the first dip.
+
+   But here's the problem: in the current code, the exit only fires
+   when bars_since_entry > warmup. If the bleed starts within the
+   warmup window, the hard stop catches you instead. So you eat a 50%
+   loss instead of a 20% loss. The strategy can't help on
+   directionally-wrong trades.
+
+2. Whippy markets where price oscillates around the MA
+
+   If the option chops up and down across its own MA every few bars,
+   the first dip after warmup triggers an exit. You'll often exit at
+   break-even or small profit when actually the trade went on to make
+   $50 later. The strategy is allergic to chop.
+
+3. Sub-$0.10 contracts
+
+   When the option premium is tiny, MA differences are pennies. A
+   $0.07 entry with MA at $0.06 means a 1¢ dip exits you for a flat
+   trade. No strategy works well on near-zero contracts, but Bollinger
+   fails especially gracelessly.
+
+
+THE SUBTLE BUG WORTH KNOWING
+----------------------------
+
+Look at the hard-stop stopPrice returned in the trace:
+
+    display_stop = ma if bars_since_entry > warmup else stop_price
+    trace.append({'time': bar['time'], 'stopPrice': display_stop})
+
+The chart shows the MA as the "stop line" once warmup is past. But
+during the warmup, it shows the hard stop. So the stop line on the
+chart is doing double duty — first showing one thing, then jumping to
+show something else.
+
+This means the chart's stop trace will visibly JUMP at bar warmup + 1,
+from the hard stop level (low) up to the MA (much higher). That jump
+isn't a real strategy event — it's just a display artifact from the
+trace using two different concepts.
+
+If you ever wonder why the Bollinger stop line "teleports up" early in
+the trade on the chart, that's why.
+
+
+TWO SIMPLE IDEAS TO MAKE IT BETTER
+----------------------------------
+
+A. Use a "take-profit at MA cross from below" instead of "MA touch"
+
+   Right now the trigger is bar_low <= ma — any wick down to the MA
+   exits. But options have noisy bid/ask spreads — a single tick can
+   dip below the MA on a quote glitch.
+
+   A cleaner trigger:
+
+       # Require the previous bar to be above the MA AND this bar to
+       # close below it
+       if prev_close > prev_ma and bar_close < ma and bars_since_entry > warmup:
+           return exit at bar close
+
+   This requires a deliberate cross, not a wick. Fewer false exits.
+
+B. Use the upper Bollinger band as a separate trigger (true Bollinger)
+
+   The current implementation isn't actually using Bollinger Bands —
+   it's just using the midline (the MA). Real Bollinger Bands also have
+   an upper band at MA + 2σ. A common variant:
+
+     - Exit if price touches the upper band (overbought, take profit)
+     - Exit if price falls back to MA (mean reversion)
+
+   Adding the upper band gives you two independent exit triggers and
+   tends to catch the absolute peak of a run rather than waiting for it
+   to reverse all the way back to the midline.
+
+   That's a 4-line addition and would probably make this strategy
+   noticeably better on momentum days.
+
+
+TL;DR
+-----
+
+Bollinger MR is a moving-average take-profit with a hard-stop floor.
+It works because options after a run-up tend to revert to their recent
+average, and the MA naturally rises with the price so your protection
+level rises too. The 10-bar warmup is critical — without it, every
+trade exits at bar 1. The strategy excels on morning-pop-then-fade days
+and underperforms on monotonic trends or chop. The "stop line" on the
+chart is actually showing the MA in Phase 2, which is why it looks
+weird compared to other strategies.

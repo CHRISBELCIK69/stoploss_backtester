@@ -16,7 +16,7 @@
 #   A hard stop below entry protects the downside.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit
 
 META = {
     'enabled':     True,
@@ -27,7 +27,7 @@ META = {
     'params': [
         {'key': 'maPeriod',    'label': 'MA period (bars)',       'default': 20, 'min': 5,  'max': 100, 'step': 5,
          'hint': 'Bollinger midline lookback'},
-        {'key': 'hardStopPct', 'label': 'Hard stop (%)',          'default': 50, 'min': 5,  'max': 100, 'step': 5},
+        {'key': 'hardStopPct', 'label': 'Hard stop (%)',          'default': 25, 'min': 5,  'max': 100, 'step': 5},
         {'key': 'warmupBars',  'label': 'Warmup before MA exit',  'default': 10, 'min': 0,  'max': 50,  'step': 5,
          'hint': 'Bars after entry before the MA exit can trigger (avoids exiting immediately)'},
         {'key': 'eodTime',     'label': 'EOD exit (CST)',         'default': '15:45', 'type': 'time'},
@@ -88,7 +88,7 @@ def execute(bars, entry_idx, entry_price, params):
                 return {'exitBar': bar, 'exitReason': 'trailing_stop', 'stopPrice': fill,
                         'highWaterMark': bar_high, 'maAtExit': round(ma, 4), 'stopTrace': trace}
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': display_stop,
                     'highWaterMark': bar_high, 'stopTrace': trace}
 

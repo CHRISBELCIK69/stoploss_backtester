@@ -27,7 +27,7 @@
 #   rising trail with a visible floor line in Phase 2.
 # ============================================================
 
-from backtest_engine import to_minutes
+from backtest_engine import to_minutes, should_eod_exit, append_trace
 from data_provider import fetch_daily_bars
 
 META = {
@@ -118,8 +118,10 @@ def execute(bars, entry_idx, entry_price, params):
 
     phase2_active   = False
     high_water_mark = entry_price
+    initial_stop    = stop_price   # ATR-based starting stop, never moves
 
-    trace = []
+    trace  = []
+    extras = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar      = bars[i]
@@ -150,6 +152,10 @@ def execute(bars, entry_idx, entry_price, params):
                 stop_price = new_stop
 
         trace.append({'time': bar['time'], 'stopPrice': stop_price})
+        # Extras: initial ATR stop, profit target, guaranteed floor
+        append_trace(extras, 'Initial ATR stop', bar, initial_stop)
+        append_trace(extras, 'Profit target',    bar, profit_target)
+        append_trace(extras, 'Floor (locked)',   bar, floor_stop)
 
         # Only check stop if phase2 was already active, or still in phase 1
         if not phase2_active or was_phase2:
@@ -161,7 +167,7 @@ def execute(bars, entry_idx, entry_price, params):
                     'exitBar': bar, 'exitReason': reason,
                     'stopPrice': bar_open, 'highWaterMark': high_water_mark,
                     'phase2Active': phase2_active, 'atr': round(atr, 4),
-                    'gapUsed': round(gap, 4), 'stopTrace': trace,
+                    'gapUsed': round(gap, 4), 'stopTrace': trace, 'extraTraces': extras,
                 }
 
             if bar_low <= stop_price:
@@ -169,20 +175,20 @@ def execute(bars, entry_idx, entry_price, params):
                     'exitBar': bar, 'exitReason': reason,
                     'stopPrice': stop_price, 'highWaterMark': high_water_mark,
                     'phase2Active': phase2_active, 'atr': round(atr, 4),
-                    'gapUsed': round(gap, 4), 'stopTrace': trace,
+                    'gapUsed': round(gap, 4), 'stopTrace': trace, 'extraTraces': extras,
                 }
 
-        if bar_mins >= to_minutes(eod_time):
+        if should_eod_exit(bar, params):
             return {
                 'exitBar': bar, 'exitReason': 'eod',
                 'stopPrice': stop_price, 'highWaterMark': high_water_mark,
                 'phase2Active': phase2_active, 'atr': round(atr, 4),
-                'gapUsed': round(gap, 4), 'stopTrace': trace,
+                'gapUsed': round(gap, 4), 'stopTrace': trace, 'extraTraces': extras,
             }
 
     return {
         'exitBar': bars[-1], 'exitReason': 'expiry',
         'stopPrice': stop_price, 'highWaterMark': high_water_mark,
         'phase2Active': phase2_active, 'atr': round(atr, 4),
-        'gapUsed': round(gap, 4), 'stopTrace': trace,
+        'gapUsed': round(gap, 4), 'stopTrace': trace, 'extraTraces': extras,
     }

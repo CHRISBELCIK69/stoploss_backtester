@@ -32,6 +32,9 @@ from strategies import (
     exit_tsm_devstop,
     exit_tsm_volspike,
     exit_tsm_bollinger,
+    exit_tsm_devstop_seeded,
+    exit_tsm_bollinger_bands,
+    exit_tsm_bollinger_armed,
 )
 
 # Order controls display order in CLI --list-strategies
@@ -57,6 +60,9 @@ _STRATEGIES = [
     exit_tsm_devstop,
     exit_tsm_volspike,
     exit_tsm_bollinger,
+    exit_tsm_devstop_seeded,
+    exit_tsm_bollinger_bands,
+    exit_tsm_bollinger_armed,
 ]
 
 # Build lookup map: id → module
