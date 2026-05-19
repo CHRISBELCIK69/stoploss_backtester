@@ -1,0 +1,422 @@
+# ============================================================
+# strategies/_bs_math.py
+# Black-Scholes math used by delta-based strategies.
+#
+# All functions are pure Python — no NumPy dependency. Performance is
+# fine for the per-bar IV solve given typical 0DTE bar counts (~400).
+#
+# Conventions:
+#   S       — underlying spot price
+#   K       — strike
+#   T       — time to expiry in years (calendar)
+#   r       — risk-free rate (default 0.05)
+#   sigma   — implied volatility
+#   option_type — 'C' or 'P'
+# ============================================================
+
+import math
+from datetime import datetime
+
+SQRT_2PI = math.sqrt(2 * math.pi)
+
+
+def _normal_cdf(x):
+    """Standard normal CDF — accurate enough via math.erf."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _normal_pdf(x):
+    return math.exp(-0.5 * x * x) / SQRT_2PI
+
+
+def bs_price(S, K, T, r, sigma, option_type):
+    """Black-Scholes price for a European option."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        if option_type == 'C':
+            return max(0.0, S - K)
+        return max(0.0, K - S)
+
+    vol_sqrt_t = sigma * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / vol_sqrt_t
+    d2 = d1 - vol_sqrt_t
+    discount = math.exp(-r * T)
+
+    if option_type == 'C':
+        return S * _normal_cdf(d1) - K * discount * _normal_cdf(d2)
+    return K * discount * _normal_cdf(-d2) - S * _normal_cdf(-d1)
+
+
+def bs_delta(S, K, T, r, sigma, option_type):
+    """
+    Black-Scholes delta.
+      Call:  N(d1) — always in [0, 1]
+      Put:   N(d1) - 1 — always in [-1, 0]
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        if option_type == 'C':
+            return 1.0 if S > K else (0.5 if S == K else 0.0)
+        return -1.0 if S < K else (-0.5 if S == K else 0.0)
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    if option_type == 'C':
+        return _normal_cdf(d1)
+    return _normal_cdf(d1) - 1.0
+
+
+# ─────────────────────────────────────────────
+# Full greeks (gamma, theta, vega, charm, vanna)
+# ─────────────────────────────────────────────
+# Conventions (match the way option traders typically read greeks):
+#   gamma  — per $1 move in underlying (always positive for long options)
+#   theta  — per calendar day  (negative for long, divide annualised by 365)
+#   vega   — per 1 percentage-point move in IV (divide annualised by 100)
+#   charm  — per calendar day  (dDelta/dT, divide annualised by 365)
+#   vanna  — dDelta/dSigma (per 1.0 change in sigma — NOT per 1%)
+#
+# All return None on degenerate inputs (T <= 0 or sigma <= 0 etc).
+# Greeks at/near expiry are not meaningful — strategies should treat
+# None as "unavailable" and fall back to hard-stop logic.
+
+_CAL_DAYS = 365.0
+
+
+def _d1_d2(S, K, T, r, sigma):
+    """Helper — returns (d1, d2) or (None, None) on degenerate input."""
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return None, None
+    try:
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        return d1, d2
+    except (ValueError, ZeroDivisionError):
+        return None, None
+
+
+def bs_gamma(S, K, T, r, sigma):
+    """Gamma — same for calls and puts. Per $1 underlying move."""
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return None
+    return _normal_pdf(d1) / (S * sigma * math.sqrt(T))
+
+
+def bs_theta(S, K, T, r, sigma, option_type):
+    """Theta — per calendar day. Negative for long options."""
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return None
+    sqrt_T  = math.sqrt(T)
+    pdf_d1  = _normal_pdf(d1)
+    disc    = math.exp(-r * T)
+    term1   = -(S * pdf_d1 * sigma) / (2.0 * sqrt_T)
+    if option_type == 'C':
+        annual = term1 - r * K * disc * _normal_cdf(d2)
+    else:
+        annual = term1 + r * K * disc * _normal_cdf(-d2)
+    return annual / _CAL_DAYS
+
+
+def bs_vega(S, K, T, r, sigma):
+    """Vega — per 1 percentage-point IV move. Same for calls and puts."""
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return None
+    return S * math.sqrt(T) * _normal_pdf(d1) / 100.0
+
+
+def bs_charm(S, K, T, r, sigma, option_type):
+    """Charm — dDelta/dT, per calendar day."""
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return None
+    pdf_d1 = _normal_pdf(d1)
+    sqrt_T = math.sqrt(T)
+    # Annualised charm: same magnitude for call and put, sign convention
+    # below matches the common Hull / Wilmott form.
+    annual = -pdf_d1 * (2.0 * r * T - d2 * sigma * sqrt_T) / (2.0 * T * sigma * sqrt_T)
+    if option_type == 'P':
+        # For puts the contribution from the cost-of-carry term flips sign.
+        annual = annual - r * math.exp(-r * T) * (1.0 - _normal_cdf(d2)) \
+                       + r * math.exp(-r * T) * _normal_cdf(d2)
+    return annual / _CAL_DAYS
+
+
+def bs_vanna(S, K, T, r, sigma):
+    """Vanna — dDelta/dSigma (per 1.0 change in sigma)."""
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return None
+    return -_normal_pdf(d1) * d2 / sigma
+
+
+def bs_greeks(S, K, T, r, sigma, option_type):
+    """
+    Compute every greek in one shot. Returns a dict:
+
+      { 'delta', 'gamma', 'theta', 'vega', 'charm', 'vanna',
+        'iv': sigma,  'T': T }
+
+    All values are None if inputs are degenerate.
+    Cheaper than calling each bs_* function separately — d1/d2 are
+    computed once and reused.
+    """
+    out = {
+        'delta': None, 'gamma': None, 'theta': None,
+        'vega':  None, 'charm': None, 'vanna': None,
+        'iv':    sigma,
+        'T':     T,
+    }
+
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    if d1 is None:
+        return out
+
+    try:
+        sqrt_T = math.sqrt(T)
+        pdf_d1 = _normal_pdf(d1)
+        disc   = math.exp(-r * T)
+
+        # Delta
+        if option_type == 'C':
+            out['delta'] = _normal_cdf(d1)
+        else:
+            out['delta'] = _normal_cdf(d1) - 1.0
+
+        # Gamma
+        out['gamma'] = pdf_d1 / (S * sigma * sqrt_T)
+
+        # Theta — per calendar day
+        term1 = -(S * pdf_d1 * sigma) / (2.0 * sqrt_T)
+        if option_type == 'C':
+            theta_annual = term1 - r * K * disc * _normal_cdf(d2)
+        else:
+            theta_annual = term1 + r * K * disc * _normal_cdf(-d2)
+        out['theta'] = theta_annual / _CAL_DAYS
+
+        # Vega — per 1% IV move
+        out['vega'] = S * sqrt_T * pdf_d1 / 100.0
+
+        # Charm — dDelta/dT per calendar day
+        charm_annual = -pdf_d1 * (2.0 * r * T - d2 * sigma * sqrt_T) \
+                       / (2.0 * T * sigma * sqrt_T)
+        if option_type == 'P':
+            charm_annual = charm_annual \
+                - r * disc * (1.0 - _normal_cdf(d2)) \
+                + r * disc * _normal_cdf(d2)
+        out['charm'] = charm_annual / _CAL_DAYS
+
+        # Vanna — dDelta/dSigma
+        out['vanna'] = -pdf_d1 * d2 / sigma
+
+    except (ValueError, ZeroDivisionError, OverflowError):
+        return {**out, 'delta': None, 'gamma': None, 'theta': None,
+                'vega':  None, 'charm': None, 'vanna': None}
+
+    return out
+
+
+def implied_vol(market_price, S, K, T, r, option_type,
+                initial_guess=0.5, max_iter=40, tol=1e-4):
+    """
+    Newton-Raphson IV solver. Returns sigma such that BS(sigma) ≈ market_price.
+    Falls back to initial_guess if it can't converge.
+    """
+    if T <= 0 or market_price <= 0 or S <= 0 or K <= 0:
+        return 0.0
+
+    # Hard floor: market price can't be less than intrinsic
+    if option_type == 'C':
+        intrinsic = max(0.0, S - K * math.exp(-r * T))
+    else:
+        intrinsic = max(0.0, K * math.exp(-r * T) - S)
+    if market_price <= intrinsic + 1e-6:
+        return 0.0
+
+    sigma = initial_guess
+    for _ in range(max_iter):
+        price = bs_price(S, K, T, r, sigma, option_type)
+        diff  = price - market_price
+        if abs(diff) < tol:
+            return sigma
+        # Vega for the Newton step
+        try:
+            d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        except (ValueError, ZeroDivisionError):
+            return sigma
+        vega = S * _normal_pdf(d1) * math.sqrt(T)
+        if vega < 1e-10:
+            return sigma
+        sigma = sigma - diff / vega
+        # Clamp to a sane range
+        if sigma <= 0.005:
+            sigma = 0.005
+        if sigma > 5.0:
+            sigma = 5.0
+    return sigma
+
+
+def years_to_expiry(bar_time_str, expiry_date, expiry_hour=16):
+    """
+    Compute time-to-expiry in years (calendar basis) from a bar timestamp
+    to the standard 16:00 ET expiry.
+
+    bar_time_str — 'YYYY-MM-DD HH:MM'
+    expiry_date  — 'YYYY-MM-DD'
+    expiry_hour  — defaults to 16 (4 PM ET, standard equity-options expiry)
+    """
+    try:
+        bar_dt    = datetime.strptime(bar_time_str[:16], '%Y-%m-%d %H:%M')
+        expiry_dt = datetime.strptime(expiry_date, '%Y-%m-%d').replace(hour=expiry_hour)
+        delta_seconds = (expiry_dt - bar_dt).total_seconds()
+        if delta_seconds <= 0:
+            return 0.0
+        return delta_seconds / (365.25 * 24 * 3600)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def build_underlying_index(underlying_bars):
+    """
+    Build a {time: close_price} dict for O(1) lookup of spot price
+    at a given option-bar timestamp.
+    """
+    if not underlying_bars:
+        return {}
+    return {b['time'][:16]: float(b['close']) for b in underlying_bars}
+
+
+def spot_at(underlying_index, bar_time_str):
+    """
+    Look up spot price at a given timestamp. Falls back to the nearest
+    earlier timestamp if exact match missing (which happens at minute
+    boundaries occasionally).
+    """
+    key = bar_time_str[:16]
+    if key in underlying_index:
+        return underlying_index[key]
+    # Walk back up to 5 minutes
+    try:
+        dt = datetime.strptime(key, '%Y-%m-%d %H:%M')
+        for back in range(1, 6):
+            from datetime import timedelta
+            k2 = (dt - timedelta(minutes=back)).strftime('%Y-%m-%d %H:%M')
+            if k2 in underlying_index:
+                return underlying_index[k2]
+    except ValueError:
+        pass
+    return None
+
+
+# ─────────────────────────────────────────────
+# Bar enrichment — write greeks into every bar
+# ─────────────────────────────────────────────
+
+def enrich_bars_with_greeks(bars, contract, cfg, underlying_bars,
+                            solve_iv=True):
+    """
+    Mutate `bars` in place so each bar gets bar['greeks'] = {
+      delta, gamma, theta, vega, charm, vanna, iv, T, dte, S_used
+    }.
+
+    If `underlying_bars` is None/empty (no spot data), every bar gets
+    bar['greeks'] = None — strategies are expected to detect that and
+    fall back to hard-stop-only behavior (mirrors the pattern in
+    exit_delta_threshold.py).
+
+    Params:
+      bars             — list of bar dicts from fetch_bars()
+      contract         — contract dict with strike, type, expiry, symbol
+      cfg              — CONFIG (uses defaults.riskFreeRate, defaults.historicalVol)
+      underlying_bars  — list of underlying bars from fetch_underlying_bars()
+      solve_iv         — if True, back-solve IV per bar; if False, use
+                         historicalVol from config.
+    """
+    if not bars:
+        return
+
+    K           = float(contract.get('strike', 0))
+    option_type = contract.get('type', 'C').upper()
+    expiry_date = contract.get('expiry', '')
+
+    defaults = cfg.get('defaults', {}) if isinstance(cfg, dict) else {}
+    r        = float(defaults.get('riskFreeRate', 0.0525))
+    hist_vol = float(defaults.get('historicalVol', 0.35))
+
+    if K <= 0 or not expiry_date or not underlying_bars:
+        for bar in bars:
+            bar['greeks'] = None
+        return
+
+    spot_idx = build_underlying_index(underlying_bars)
+    if not spot_idx:
+        for bar in bars:
+            bar['greeks'] = None
+        return
+
+    # Warm-start sigma between bars — Newton converges much faster
+    # from a previous-bar guess than from a cold 0.5.
+    sigma_guess = 0.5
+    try:
+        expiry_dt = datetime.strptime(expiry_date, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        expiry_dt = None
+
+    for bar in bars:
+        bar_time = bar['time']
+        S        = spot_at(spot_idx, bar_time)
+
+        if S is None or S <= 0:
+            # No spot at this timestamp — leave greeks empty so strategies
+            # treat this bar as "unavailable". Do NOT substitute K for S.
+            bar['greeks'] = None
+            continue
+
+        T = years_to_expiry(bar_time, expiry_date)
+
+        # Implied vol — solve from bar close, warm-started.
+        bar_close = float(bar.get('close') or 0)
+        if solve_iv and bar_close > 0 and T > 0:
+            sigma = implied_vol(bar_close, S, K, T, r, option_type,
+                                initial_guess=sigma_guess)
+            if sigma and sigma > 0:
+                sigma_guess = sigma
+            else:
+                sigma = hist_vol
+        else:
+            sigma = hist_vol
+
+        greeks = bs_greeks(S, K, T, r, sigma, option_type)
+
+        # DTE (calendar days remaining)
+        dte = None
+        if expiry_dt is not None:
+            try:
+                bar_date = datetime.strptime(bar_time[:10], '%Y-%m-%d').date()
+                dte = max(0, (expiry_dt - bar_date).days)
+            except (ValueError, TypeError):
+                dte = None
+
+        greeks['dte']    = dte
+        greeks['S_used'] = round(S, 4)
+        bar['greeks']    = greeks
+
+
+def get_greek(bar, greek_name, fallback=None):
+    """
+    Safe reader for bar['greeks'][greek_name]. Returns `fallback` if
+    greeks are unavailable (spot was missing, T was 0, BS diverged, etc).
+
+    Usage in a strategy:
+        from strategies._bs_math import get_greek
+        gamma = get_greek(bar, 'gamma')
+        if gamma is None:
+            continue                 # fall through to hard stop
+        if gamma > 0.5:
+            ...
+    """
+    greeks = bar.get('greeks') if isinstance(bar, dict) else None
+    if not greeks:
+        return fallback
+    val = greeks.get(greek_name)
+    return fallback if val is None else val
