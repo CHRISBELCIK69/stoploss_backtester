@@ -38,6 +38,9 @@
     <button class="run-btn" id="runBtn" onclick="runBacktest()">Run backtest</button>
   </div>
 
+  <!-- Timing breakdown (populated after run) -->
+  <div id="timingResults"></div>
+
   <!-- Aggregate stats across all contracts (populated after run) -->
   <div id="aggregateResults"></div>
 
@@ -142,11 +145,38 @@ function extraColorForRole(strategyColor, traceName) {
   return blendColors(strategyColor, strategyColor, 0, 0.55);
 }
 
-// Strategy family detection — strips trailing numeric suffix (_15, _30)
-// and known variant suffixes (_armed, _bands, _seeded) so variants
-// cluster under the base family name.
+// Strategy family detection. Handles three cases:
+//   1) PREFIX-based grouping — anything starting with a known family prefix
+//      collapses to that prefix. Cleanest for families with diverse variant
+//      names that don't share a common suffix (e.g. underlying_*).
+//   2) Numeric suffix stripping — e.g. trailing_pct_15 → trailing_pct,
+//      bracket_15_10 → bracket.
+//   3) Known variant suffixes — _armed, _bands, _seeded, etc.
 function strategyFamily(strategyId) {
-  let f = (strategyId || '').replace(/_\d+$/, '');
+  const sid = strategyId || '';
+
+  // (0) Exact-ID family overrides — for strategies that conceptually belong
+  // to a family but whose ID doesn't match its prefix pattern. Add here
+  // rather than renaming IDs that are referenced elsewhere.
+  const exactFamilies = {
+    'technical_level_stop': 'underlying',
+    'ma_cross_stop':        'underlying',
+  };
+  if (exactFamilies[sid]) return exactFamilies[sid];
+
+  // (1) Prefix groupings — strategies whose variants don't share a suffix
+  const prefixFamilies = [
+    { prefix: 'underlying_', family: 'underlying' },
+  ];
+  for (const { prefix, family } of prefixFamilies) {
+    if (sid.startsWith(prefix)) return family;
+  }
+
+  // (2) Strip trailing _<digits> repeatedly (handles bracket_15_10)
+  let f = sid;
+  while (/_\d+$/.test(f)) f = f.replace(/_\d+$/, '');
+
+  // (3) Strip known variant suffixes
   const variantSuffixes = ['_armed', '_bands', '_seeded', '_full', '_trigger'];
   for (const s of variantSuffixes) {
     if (f.endsWith(s)) return f.slice(0, -s.length);
@@ -172,6 +202,21 @@ const FAMILY_LABELS = {
   'tsm_devstop':        'TSM DevStop',
   'tsm_volspike':       'TSM Vol spike',
   'tsm_bollinger':      'TSM Bollinger',
+  'bracket':            'Bracket TP/SL',
+  // Family 1 — Premium-based
+  'premium_pct_stop':   'Premium % stop',
+  'profit_target_pct':  'Profit target %',
+  'premium_trail':      'Premium trail',
+  'spread_widen_stop':  'Spread widen',
+  // Family 4 — Time-based
+  'dte_threshold':      'DTE threshold',
+  'calendar_event_exit':'Calendar event',
+  'time_condition_exit':'Time + condition',
+  'session_exit':       'Session window',
+  // Family 2 — Underlying price stops (groups _dollar_move + _pct_move variants)
+  'underlying':         'Underlying price',
+  // Family 3 — Greeks-based
+  'delta_threshold':    'Delta',
 };
 
 // Per-contract visibility filter — strategy ID → bool (only false hides)
@@ -180,6 +225,165 @@ let strategyFilter = {};
 function resetZoom(canvasId) {
   const inst = chartInstances.find(c => c.canvas && c.canvas.id === canvasId);
   if (inst && inst.resetZoom) inst.resetZoom();
+}
+
+// ── Bracket Lab — interactive TP/SL slider ──────────
+// Runs the `bracket` strategy with custom TP/SL on a single contract
+// and overlays the result on the chart in a special gold color so it
+// pops above all the regular strategy traces.
+const LAB_COLOR = '#facc15';   // amber-yellow — distinct from any auto-generated HSL color
+
+async function runBracketLab(contractId) {
+  const lab    = document.getElementById(`${contractId}_lab`);
+  const result = document.getElementById(`${contractId}_lab_result`);
+  if (!lab) return;
+
+  const tp = parseInt(document.getElementById(`${contractId}_tp_slider`).value, 10);
+  const sl = parseInt(document.getElementById(`${contractId}_sl_slider`).value, 10);
+  const occ        = lab.getAttribute('data-occ');
+  const entryDate  = lab.getAttribute('data-entry-date');
+  const entryTime  = lab.getAttribute('data-entry-time');
+
+  result.innerHTML = `<span style="color:var(--text-secondary)">Running TP ${tp}% / SL ${sl}%…</span>`;
+
+  try {
+    const resp = await fetch('/api/run_one', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        occ, entryDate, expiry: entryDate, entryTime,
+        strategyId: 'bracket',
+        params: { takeProfitPct: tp, stopLossPct: sl },
+        qty: 1,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      result.innerHTML = `<span class="neg">Error: ${data.error || 'unknown'}</span>`;
+      return;
+    }
+    const r = data.result;
+    const rr = (tp / sl).toFixed(2);
+    const cls = r.pnl >= 0 ? 'pos' : 'neg';
+    result.innerHTML = `
+      <span class="lab-result-row">
+        <span><strong>TP ${tp}%</strong> / <strong>SL ${sl}%</strong> &nbsp;<span class="lab-rr">R:R ${rr}</span></span>
+        <span>Entry $${r.entryPrice.toFixed(2)} → Exit $${r.exitPrice.toFixed(2)}</span>
+        <span class="${cls}" style="font-weight:600;font-family:var(--font-mono)">${fmtDollars(r.pnl)}</span>
+        <span class="${cls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</span>
+        <span>${badgeFor(r.exitReason)}</span>
+        <span style="color:var(--text-muted);font-size:11px">${fmtTs(r.exitTs)}</span>
+      </span>`;
+
+    overlayLabResultOnChart(contractId, r, tp, sl);
+  } catch (e) {
+    result.innerHTML = `<span class="neg">Request failed: ${e.message}</span>`;
+  }
+}
+
+// Render (or replace) the lab strategy's lines on the contract chart.
+function overlayLabResultOnChart(contractId, result, tp, sl) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+
+  // Remove any previous lab datasets
+  chart.data.datasets = chart.data.datasets.filter(d => !d.isLabResult);
+
+  // Build the time → idx map for this chart
+  const labels = chart.data.labels;
+  const labelsLen = labels.length;
+  const barTimes = chart.data.datasets[0]?._barTimes || [];   // we'll set this when building chart
+
+  // Fallback: rebuild timeIdx from any non-null primary dataset
+  // We just need to map result.stopTrace times → chart x-indices.
+  const timeIdx = {};
+  // The label uses bar.time slice(11,16) — but we need full times.
+  // Use the chart's stored bar times if present:
+  (barTimes.length ? barTimes : []).forEach((t, i) => { timeIdx[t] = i; });
+
+  // If we don't have stored bar times, infer from the trace times' positions.
+  // The chart's price line has the same length as bars[], so we map sequentially.
+  const trace  = result.stopTrace || [];
+  const extras = result.extraTraces || {};
+
+  // Build primary stop-line series
+  const stopData = new Array(labelsLen).fill(null);
+  const tpData   = new Array(labelsLen).fill(null);
+  const slData   = new Array(labelsLen).fill(null);
+
+  trace.forEach((t, k) => {
+    const idx = timeIdx[t.time] !== undefined ? timeIdx[t.time] : null;
+    if (idx !== null) stopData[idx] = t.stopPrice;
+  });
+  (extras['Take profit'] || []).forEach(t => {
+    const idx = timeIdx[t.time]; if (idx !== undefined) tpData[idx] = t.stopPrice;
+  });
+  (extras['Stop loss'] || []).forEach(t => {
+    const idx = timeIdx[t.time]; if (idx !== undefined) slData[idx] = t.stopPrice;
+  });
+
+  // Find exit marker index — match by exitTs string
+  let exitIdx = -1;
+  if (result.exitTs && timeIdx[result.exitTs] !== undefined) exitIdx = timeIdx[result.exitTs];
+
+  // TP target line — green-amber
+  chart.data.datasets.push({
+    label: `Lab · Take profit (${tp}%)`,
+    data:  tpData,
+    borderColor: 'rgba(29, 158, 117, 0.95)',
+    backgroundColor: 'transparent',
+    pointRadius: 0,
+    borderWidth: 2,
+    borderDash: [2, 4],
+    tension: 0,
+    spanGaps: true,
+    isLabResult: true,
+    order: -2,
+  });
+  // SL stop line — red
+  chart.data.datasets.push({
+    label: `Lab · Stop loss (${sl}%)`,
+    data:  slData,
+    borderColor: 'rgba(226, 75, 74, 0.95)',
+    backgroundColor: 'transparent',
+    pointRadius: 0,
+    borderWidth: 2,
+    borderDash: [2, 4],
+    tension: 0,
+    spanGaps: true,
+    isLabResult: true,
+    order: -2,
+  });
+  // Primary lab line — amber, with exit marker
+  chart.data.datasets.push({
+    label: `Lab · Bracket TP${tp}/SL${sl}`,
+    data: stopData,
+    borderColor: LAB_COLOR,
+    backgroundColor: 'transparent',
+    pointRadius: stopData.map((v, i) => i === exitIdx ? 12 : 0),
+    pointStyle:  stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+    pointBackgroundColor: LAB_COLOR,
+    pointBorderColor: '#ffffff',
+    pointBorderWidth: stopData.map((v, i) => i === exitIdx ? 3 : 0),
+    pointHoverRadius: stopData.map((v, i) => i === exitIdx ? 14 : 0),
+    borderWidth: 2.5,
+    borderDash: [6, 3],
+    tension: 0.1,
+    spanGaps: true,
+    isLabResult: true,
+    order: -3,
+  });
+  chart.update();
+}
+
+function clearBracketLab(contractId) {
+  const chart = findChartForContract(contractId);
+  if (chart) {
+    chart.data.datasets = chart.data.datasets.filter(d => !d.isLabResult);
+    chart.update();
+  }
+  const result = document.getElementById(`${contractId}_lab_result`);
+  if (result) result.innerHTML = '';
 }
 
 // ── Strategy chip toggle ───────────────────
@@ -462,6 +666,32 @@ function renderContractBlock(c, idx) {
       </div>
       <div style="height:620px;margin-bottom:20px"><canvas id="${id}_chart"></canvas></div>
 
+      <!-- ── Bracket Lab — interactive TP/SL slider ──────────── -->
+      <div class="bracket-lab" id="${id}_lab" data-occ="${c.occ}" data-entry-date="${c.entryDate}"
+           data-entry-time="${c.entryTime}">
+        <div class="lab-header">
+          <span class="lab-title">Bracket Lab</span>
+          <span class="lab-help">Try your own TP/SL on this contract — the result overlays on the chart.</span>
+        </div>
+        <div class="lab-controls">
+          <div class="lab-slider">
+            <label>Take profit <span class="lab-value pos" id="${id}_tp_val">50%</span></label>
+            <input type="range" min="5" max="500" step="5" value="50"
+                   id="${id}_tp_slider"
+                   oninput="document.getElementById('${id}_tp_val').textContent = this.value + '%'">
+          </div>
+          <div class="lab-slider">
+            <label>Stop loss <span class="lab-value neg" id="${id}_sl_val">25%</span></label>
+            <input type="range" min="5" max="100" step="5" value="25"
+                   id="${id}_sl_slider"
+                   oninput="document.getElementById('${id}_sl_val').textContent = this.value + '%'">
+          </div>
+          <button class="run-btn lab-run-btn" onclick="runBracketLab('${id}')">Test</button>
+          <button class="toggle-btn-mini" onclick="clearBracketLab('${id}')">Clear</button>
+        </div>
+        <div class="lab-result" id="${id}_lab_result"></div>
+      </div>
+
       <!-- Strategy how-it-works -->
       <div style="margin-bottom:16px">
         <div class="section-label">How each strategy works</div>
@@ -537,7 +767,9 @@ function buildChart(c, idx) {
     order: 10,
   });
 
-  // Price close as the main line — extra thick so it pops over the stop lines
+  // Price close as the main line — extra thick so it pops over the stop lines.
+  // Also store the full bar times array on this dataset so the Bracket Lab
+  // can map its result's trace times back to chart x-indices.
   datasets.push({
     label: 'Premium (close)',
     data: closePrices,
@@ -547,6 +779,7 @@ function buildChart(c, idx) {
     borderWidth: 2.5,
     tension: 0.15,
     order: 0,
+    _barTimes: bars.map(b => b.time),
   });
 
   // Entry price reference line
@@ -794,6 +1027,43 @@ function buildChart(c, idx) {
 }
 
 
+// ── Timing breakdown ───────────────────────────────
+function renderTimings(t) {
+  const el = document.getElementById('timingResults');
+  if (!el || !t) return;
+  const fmtMs = ms => ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`;
+  const total = t.totalMs || 0;
+  const pct = ms => total > 0 ? Math.round(ms / total * 100) : 0;
+  // Bar widths normalised to the largest phase so the visual reads cleanly
+  const maxMs = Math.max(t.minBarsMs || 0, t.dailyBarsMs || 0, t.strategyExecMs || 0, 1);
+
+  const row = (label, ms, color) => `
+    <div class="timing-row">
+      <span class="timing-label">${label}</span>
+      <div class="timing-bar-wrap">
+        <div class="timing-bar" style="width:${(ms / maxMs * 100).toFixed(1)}%;background:${color}"></div>
+      </div>
+      <span class="timing-value">${fmtMs(ms)} <span class="timing-pct">${pct(ms)}%</span></span>
+    </div>`;
+
+  el.innerHTML = `
+    <div class="card timing-card" style="margin-top:16px">
+      <div class="section-label">
+        Performance
+        <span style="float:right;font-weight:600;color:var(--text);font-family:var(--font-mono)">
+          ${fmtMs(total)} total &middot; ${t.contracts || 0} contracts &middot; ${t.strategyRuns || 0} strategy runs
+        </span>
+      </div>
+      ${row('Fetch 1-min bars (concurrent)', t.minBarsMs || 0, '#6c8cff')}
+      ${row('Fetch daily bars (shared cache)', t.dailyBarsMs || 0, '#a855f7')}
+      ${row('Strategy execution', t.strategyExecMs || 0, '#1d9e75')}
+      <div style="margin-top:8px;font-size:10px;color:var(--text-muted)">
+        Optimizations: concurrent Polygon fetches (10 workers), shared daily-bar cache across ATR strategies.
+      </div>
+    </div>`;
+}
+
+
 // ── Aggregate stats across all contracts ───────────
 
 // Group per-contract strategy results by strategyId and compute stats
@@ -1015,8 +1285,9 @@ function sortAgg(key) {
 async function runBacktest() {
   showError('');
   document.getElementById('logBox').textContent = '';
-  document.getElementById('contractResults').innerHTML = '';
+  document.getElementById('contractResults').innerHTML  = '';
   document.getElementById('aggregateResults').innerHTML = '';
+  document.getElementById('timingResults').innerHTML    = '';
   document.getElementById('logCard').classList.add('hidden');
 
   // Destroy old charts
@@ -1052,6 +1323,9 @@ async function runBacktest() {
       document.getElementById('logBox').textContent = data.log;
       document.getElementById('logCard').classList.remove('hidden');
     }
+
+    // Show timing breakdown — visible proof of the perf optimization
+    if (data.timings) renderTimings(data.timings);
 
     const contracts = data.contracts || [];
     if (!contracts.length) { showError('No valid results returned.'); return; }

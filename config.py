@@ -15,7 +15,11 @@ CONFIG = {
     # (Railway: Variables tab; Render: Environment Variables; etc.)
 
     'polygon': {
-        'apiKey': os.environ.get('POLYGON_API_KEY', 'YOUR_POLYGON_API_KEY_HERE'),
+        # Local dev: hardcoded key works as the fallback below.
+        # When deployed (Railway/Render), set POLYGON_API_KEY env var which
+        # overrides this. The env var takes precedence so hardcoded value
+        # is only used when env var is missing.
+        'apiKey': os.environ.get('POLYGON_API_KEY', 'M4AWhflTA70bQJaj7p_uR4juaJ_Z6WO0'),
     },
 
 
@@ -33,6 +37,14 @@ CONFIG = {
         #   'daily'  — exit at eodTime every day  (correct for 0DTE)
         #   'expiry' — only exit at eodTime on the contract's expiry day
         'eodMode': os.environ.get('EOD_MODE', 'daily'),
+
+        # Black-Scholes greeks calculator settings — read by
+        # strategies/_bs_math.py enrich_bars_with_greeks().
+        # riskFreeRate:  annual risk-free rate (decimal). Track Fed funds.
+        # historicalVol: fallback IV used when the Newton-Raphson IV
+        #                solver fails or no bar close is available.
+        'riskFreeRate':  float(os.environ.get('RISK_FREE_RATE',  '0.0525')),
+        'historicalVol': float(os.environ.get('HISTORICAL_VOL',  '0.20')),
     },
 
 }

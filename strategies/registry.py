@@ -35,6 +35,35 @@ from strategies import (
     exit_tsm_devstop_seeded,
     exit_tsm_bollinger_bands,
     exit_tsm_bollinger_armed,
+    exit_bracket,
+    exit_bracket_15_10,
+    exit_bracket_25_15,
+    exit_bracket_50_15,
+    exit_bracket_50_25,
+    exit_bracket_100_25,
+    exit_bracket_100_50,
+
+    # Family 1 — Premium-based
+    exit_premium_pct,
+    exit_profit_target_pct,
+    exit_premium_trail,
+    exit_spread_widen,
+
+    # Family 4 — Time-based
+    exit_dte_threshold,
+    exit_calendar_event,
+    exit_time_condition,
+    exit_session_exit,
+
+    # Family 2 — Underlying price stops
+    exit_underlying_dollar_move,
+    exit_underlying_pct_move,
+    exit_underlying_atr,
+    exit_technical_level,
+    exit_ma_cross,
+
+    # Family 3 — Greeks-based
+    exit_delta_threshold,
 )
 
 # Order controls display order in CLI --list-strategies
@@ -63,6 +92,35 @@ _STRATEGIES = [
     exit_tsm_devstop_seeded,
     exit_tsm_bollinger_bands,
     exit_tsm_bollinger_armed,
+    exit_bracket,
+    exit_bracket_15_10,
+    exit_bracket_25_15,
+    exit_bracket_50_15,
+    exit_bracket_50_25,
+    exit_bracket_100_25,
+    exit_bracket_100_50,
+
+    # Family 1 — Premium-based
+    exit_premium_pct,
+    exit_profit_target_pct,
+    exit_premium_trail,
+    exit_spread_widen,
+
+    # Family 4 — Time-based
+    exit_dte_threshold,
+    exit_calendar_event,
+    exit_time_condition,
+    exit_session_exit,
+
+    # Family 2 — Underlying price stops
+    exit_underlying_dollar_move,
+    exit_underlying_pct_move,
+    exit_underlying_atr,
+    exit_technical_level,
+    exit_ma_cross,
+
+    # Family 3 — Greeks-based
+    exit_delta_threshold,
 ]
 
 # Build lookup map: id → module

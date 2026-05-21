@@ -140,6 +140,57 @@ def fetch_bars(occ, start_date, end_date, cfg):
     return fetch_time_sales_polygon(occ, start_date, end_date, api_key)
 
 
+def fetch_underlying_bars(ticker, start_date, end_date, cfg):
+    """
+    Fetch 1-minute OHLC bars for the UNDERLYING stock (not the option).
+    Used by delta-based strategies that need to compute Black-Scholes IV
+    and delta from the spot price.
+
+    Polygon endpoint:
+      GET /v2/aggs/ticker/{ticker}/range/1/minute/{from}/{to}
+        (no O: prefix — that's options only)
+
+    Returns bars in the same shape as option bars (close/high/low/open/time).
+    Time strings are in Eastern timezone to align with option bar timestamps.
+    """
+    api_key = cfg.get('polygon', {}).get('apiKey', '').strip()
+    if not api_key or api_key == 'YOUR_POLYGON_API_KEY_HERE':
+        return []
+
+    params = urlencode({
+        'adjusted': 'true',
+        'sort':     'asc',
+        'limit':    50000,
+        'apiKey':   api_key,
+    })
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/range/1/minute/{start_date}/{end_date}?{params}"
+
+    try:
+        resp = requests.get(url, timeout=30)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        if data.get('status') in ('NOT_FOUND', 'ERROR'):
+            return []
+        results = data.get('results') or []
+        if not results:
+            return []
+        return [
+            {
+                'time':   _ms_to_eastern(bar['t']),
+                'open':   bar['o'],
+                'high':   bar['h'],
+                'low':    bar['l'],
+                'close':  bar['c'],
+                'volume': bar.get('v', 0),
+                'vwap':   bar.get('vw', bar['c']),
+            }
+            for bar in results
+        ]
+    except Exception:
+        return []
+
+
 def fetch_daily_bars(occ, end_date, num_days, cfg):
     """
     Fetch daily OHLCV bars for ATR computation.
