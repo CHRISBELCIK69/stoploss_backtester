@@ -64,6 +64,17 @@ from strategies import (
 
     # Family 3 — Greeks-based
     exit_delta_threshold,
+    exit_gamma_spike,
+    exit_vega_limit,
+    exit_iv_rank,
+    exit_theta_rate,
+    exit_charm_exit,
+    exit_vanna_exposure,
+    exit_delta_trail,
+
+    # Family 6 — Composite / Conditional
+    exit_delta_dte_composite,
+    exit_gamma_hardstop_or,
 )
 
 # Order controls display order in CLI --list-strategies
@@ -121,6 +132,17 @@ _STRATEGIES = [
 
     # Family 3 — Greeks-based
     exit_delta_threshold,
+    exit_gamma_spike,
+    exit_vega_limit,
+    exit_iv_rank,
+    exit_theta_rate,
+    exit_charm_exit,
+    exit_vanna_exposure,
+    exit_delta_trail,
+
+    # Family 6 — Composite / Conditional
+    exit_delta_dte_composite,
+    exit_gamma_hardstop_or,
 ]
 
 # Build lookup map: id → module
