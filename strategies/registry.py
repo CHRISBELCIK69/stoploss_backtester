@@ -72,9 +72,24 @@ from strategies import (
     exit_vanna_exposure,
     exit_delta_trail,
 
+    # Family 5 — Volatility-based
+    exit_iv_crush,
+    exit_rv_iv_divergence,
+    exit_hv_percentile,
+    exit_vol_skew_change,
+
     # Family 6 — Composite / Conditional
     exit_delta_dte_composite,
     exit_gamma_hardstop_or,
+    exit_tiered_stop,
+    exit_regime_stop,
+    exit_delta_divergence,
+
+    # Family 7 — Strategy-specific
+    exit_iron_condor_wing,
+    exit_spread_width_pct,
+    exit_calendar_iv_diff,
+    exit_diagonal_roll,
 )
 
 # Order controls display order in CLI --list-strategies
@@ -140,9 +155,24 @@ _STRATEGIES = [
     exit_vanna_exposure,
     exit_delta_trail,
 
+    # Family 5 — Volatility-based
+    exit_iv_crush,
+    exit_rv_iv_divergence,
+    exit_hv_percentile,
+    exit_vol_skew_change,
+
     # Family 6 — Composite / Conditional
     exit_delta_dte_composite,
     exit_gamma_hardstop_or,
+    exit_tiered_stop,
+    exit_regime_stop,
+    exit_delta_divergence,
+
+    # Family 7 — Strategy-specific
+    exit_iron_condor_wing,
+    exit_spread_width_pct,
+    exit_calendar_iv_diff,
+    exit_diagonal_roll,
 ]
 
 # Build lookup map: id → module

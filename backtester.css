@@ -284,6 +284,412 @@ textarea {
   min-width: 0;
 }
 
+/* ── Chip search input (per-contract + global apply zone) ──────── */
+.chip-search {
+  flex: 0 0 200px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  outline: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.chip-search::placeholder { color: var(--text-muted); }
+.chip-search:focus {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+/* ── Apply zone — global chip row that toggles a strategy on every contract ── */
+.apply-zone {
+  margin-top: 16px;
+  padding: 14px 18px;
+  border-left: 3px solid var(--accent);
+}
+.apply-chip {
+  /* Inherits base .strategy-chip styles; only differs in the "mixed" state */
+  position: relative;
+}
+.apply-chip.mixed {
+  opacity: 1;
+  background: var(--bg-card);
+  border-style: solid;
+}
+.apply-chip.mixed .chip-dot {
+  /* Override the "off" muting — chip-dot is still colored, but we add
+     a yellow ring around it to signal "some contracts on, some off" */
+  background: var(--chip-color, var(--accent)) !important;
+  box-shadow: 0 0 0 2px #facc15;
+}
+.apply-chip.mixed::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #facc15;
+}
+
+/* ── Expand-to-fullscreen modal for a single contract card ───── */
+body.expanded-open {
+  overflow: hidden;          /* prevent background scroll behind the modal */
+}
+.contract-card.expanded {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0 !important;
+  z-index: 1000;
+  overflow-y: auto;
+  border-radius: 0;
+  padding: 24px 32px 80px;
+  background: var(--bg);
+}
+/* Stretch the chart wrap inside the expanded card to fill more of the viewport */
+.contract-card.expanded .chart-wrap {
+  height: calc(100vh - 320px) !important;
+  min-height: 480px;
+  margin-bottom: 24px;
+}
+.expand-close {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 1001;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.expand-close:hover {
+  background: var(--accent);
+  color: white;
+}
+
+/* In expanded view: hide the per-strategy how-it-works list and the results
+   table. Reduces clutter so the zoom view focuses on toggles + chart + the
+   custom-fit code environment. The code-fit-zone is hidden by default and
+   only appears in the expanded view. */
+.contract-card.expanded .how-it-works,
+.contract-card.expanded .tbl-wrap {
+  display: none;
+}
+
+/* ── Code-fit zone — only visible when a contract card is expanded ── */
+.code-fit-zone { display: none; }
+.contract-card.expanded .code-fit-zone {
+  display: block;
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid #fb923c;        /* orange accent — matches overlay color */
+  border-radius: 6px;
+}
+.fit-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.fit-title {
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #fb923c;
+}
+.fit-help {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.fit-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 10px;
+  flex-wrap: wrap;
+}
+.fit-toolbar-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.fit-strategy-select {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  min-width: 240px;
+}
+.fit-strategy-select:focus { border-color: #fb923c; }
+.fit-loaded-flag {
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-muted);
+}
+.fit-loaded-flag.edited { color: #fb923c; font-weight: 600; }
+.fit-loaded-flag.clean  { color: var(--text-muted); }
+
+.fit-rundown {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.fit-rundown-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.fit-rundown-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+}
+.fit-rundown-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 1px 6px;
+  background: var(--bg-card);
+  border-radius: 3px;
+}
+.fit-rundown-tag {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #fb923c;
+  padding: 1px 6px;
+  border: 1px solid #fb923c;
+  border-radius: 3px;
+}
+.fit-rundown-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+.fit-rundown-header {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+.fit-editor {
+  width: 100%;
+  min-height: 280px;
+  max-height: 50vh;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  resize: vertical;
+  outline: none;
+  white-space: pre;
+  tab-size: 4;
+  -moz-tab-size: 4;
+}
+.fit-editor:focus { border-color: #fb923c; }
+.fit-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.fit-run-btn {
+  background: #fb923c;
+  color: #000;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.fit-run-btn:hover { background: #ea7c1c; }
+.fit-result {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.fit-traceback {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--red, #e24b4a);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* ── Timing breakdown card ─────────────────────── */
+.timing-card { padding: 14px 18px; }
+.timing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  font-size: 11px;
+}
+.timing-label {
+  flex: 0 0 230px;
+  color: var(--text-secondary);
+}
+.timing-bar-wrap {
+  flex: 1;
+  background: var(--bg);
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+}
+.timing-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.timing-value {
+  flex: 0 0 110px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.timing-pct {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+/* ── Bracket Lab — slider playground ─────────────── */
+.bracket-lab {
+  background: linear-gradient(180deg, rgba(250,204,21,0.04) 0%, var(--bg) 100%);
+  border: 1px solid rgba(250,204,21,0.25);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+}
+.lab-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.lab-title {
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #facc15;
+}
+.lab-help {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.lab-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lab-slider {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lab-slider label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.lab-slider input[type="range"] {
+  width: 100%;
+  accent-color: #facc15;
+  height: 4px;
+}
+.lab-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 48px;
+  text-align: right;
+}
+.lab-run-btn {
+  margin: 0;
+  padding: 7px 18px;
+  font-size: 12px;
+  background: #facc15;
+  color: #000;
+}
+.lab-run-btn:hover { opacity: 0.85; }
+.lab-result {
+  margin-top: 10px;
+  font-size: 12px;
+  min-height: 18px;
+}
+.lab-result-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  border: 1px solid rgba(250,204,21,0.2);
+}
+.lab-rr {
+  display: inline-block;
+  background: rgba(250,204,21,0.15);
+  color: #facc15;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
 /* ── Tables ───────────────────────────────── */
 .tbl-wrap { overflow-x: auto; }
 

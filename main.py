@@ -44,6 +44,50 @@ def list_strategies():
     return jsonify(STRATEGY_LIST)
 
 
+@app.route('/api/strategy_source/<strategy_id>')
+def get_strategy_source(strategy_id):
+    """
+    Return the source code + metadata for a registered strategy so the
+    in-browser code-fit editor can show the user what's running, with
+    a brief logic rundown extracted from the file's leading comment block.
+    """
+    import inspect
+    strategy = STRATEGY_MAP.get(strategy_id)
+    if not strategy:
+        return jsonify({'error': f'Unknown strategy: {strategy_id}'}), 404
+    try:
+        source = inspect.getsource(strategy)
+    except (OSError, TypeError) as e:
+        return jsonify({'error': f'Could not read source: {e}'}), 500
+
+    # Extract the leading file-header comment block — every line that
+    # starts with '#' (or is blank between # lines) before the first
+    # statement. This is where every strategy keeps its HOW IT WORKS block.
+    header_lines = []
+    seen_hash = False
+    for ln in source.split('\n'):
+        stripped = ln.lstrip()
+        if stripped.startswith('#'):
+            header_lines.append(ln)
+            seen_hash = True
+        elif stripped == '' and seen_hash:
+            header_lines.append(ln)
+        elif stripped == '':
+            continue          # leading blank lines before any '#'
+        else:
+            break
+    header_comment = '\n'.join(header_lines).rstrip()
+
+    return jsonify({
+        'id':             strategy.META['id'],
+        'name':           strategy.META['name'],
+        'description':    strategy.META.get('description', ''),
+        'needs_greeks':   bool(strategy.META.get('needs_greeks', False)),
+        'source':         source,
+        'header_comment': header_comment,
+    })
+
+
 @app.route('/api/run_one', methods=['POST'])
 def run_one_strategy():
     """
@@ -112,6 +156,139 @@ def run_one_strategy():
         return jsonify({'error': 'Strategy did not return a result'}), 500
 
     # Surface trace fields like the main /api/backtest endpoint does
+    stop_trace   = result.pop('stopTrace', [])
+    extra_traces = result.pop('extraTraces', {})
+    return jsonify({
+        'result': {
+            **result,
+            'stopTrace':   stop_trace,
+            'extraTraces': extra_traces,
+        },
+        'appliedParams': {k: v for k, v in params.items() if not k.startswith('_')},
+    })
+
+
+@app.route('/api/run_custom_strategy', methods=['POST'])
+def run_custom_strategy():
+    """
+    Run an ad-hoc Python strategy module (typed into the in-browser editor)
+    against ONE contract. The request supplies the full module source code
+    plus the contract identifier; we exec the code in an isolated namespace
+    and treat the resulting META/validate/execute symbols as a strategy.
+
+    Trust model: this runs locally against the user's own code. No sandbox.
+    Same trust as editing a file under strategies/ and running it directly.
+
+    Request body:
+        {
+          "occ":         "SPY260112C00690000",
+          "entryDate":   "2026-01-12",
+          "expiry":      "2026-01-12",
+          "entryTime":   "09:30",
+          "symbol":      "SPY",        (optional, derived from OCC)
+          "type":        "C",          (optional)
+          "strike":      690,          (optional)
+          "code":        "<full Python module source>",
+          "params":      { ... overrides for META defaults ... },
+          "qty":          1
+        }
+
+    Response: same shape as /api/run_one — { result: {...}, appliedParams: {...} }
+    """
+    body = request.get_json(force=True)
+    code = body.get('code', '') or ''
+    occ  = body.get('occ', '')
+    qty  = int(body.get('qty', 1))
+
+    if not code.strip():
+        return jsonify({'error': 'Strategy code is empty'}), 400
+
+    contract = {
+        'occ':       occ,
+        'symbol':    body.get('symbol', occ[:-15] if len(occ) >= 16 else occ),
+        'strike':    body.get('strike', 0),
+        'type':      body.get('type', 'C'),
+        'expiry':    body.get('expiry', ''),
+        'entryDate': body.get('entryDate', body.get('expiry', '')),
+        'entryTime': body.get('entryTime', '09:30'),
+    }
+    if not occ or not contract['entryDate']:
+        return jsonify({'error': 'occ and entryDate are required'}), 400
+
+    # Exec the user's code in an isolated namespace
+    ns = {}
+    try:
+        exec(code, ns)
+    except SyntaxError as e:
+        return jsonify({'error': f'SyntaxError: {e.msg} at line {e.lineno}'}), 400
+    except Exception as e:
+        return jsonify({'error': f'Code error during import: {type(e).__name__}: {e}'}), 400
+
+    META       = ns.get('META')
+    validate   = ns.get('validate')
+    execute_fn = ns.get('execute')
+    if not isinstance(META, dict) or not callable(execute_fn):
+        return jsonify({
+            'error': 'Strategy must define a META dict and an execute(bars, entry_idx, entry_price, params) function'
+        }), 400
+
+    # Fetch bars
+    try:
+        bars = fetch_bars(contract['occ'], contract['entryDate'], contract['expiry'], CONFIG)
+    except Exception as e:
+        return jsonify({'error': f'Bar fetch failed: {e}'}), 500
+    if not bars:
+        return jsonify({'error': 'No bars returned for contract'}), 400
+
+    # Enrich greeks if the user's META declares needs_greeks
+    underlying_bars_map = {}
+    if META.get('needs_greeks') and contract.get('symbol'):
+        try:
+            ub = fetch_underlying_bars(contract['symbol'], contract['entryDate'],
+                                       contract['expiry'], CONFIG)
+        except Exception:
+            ub = []
+        if ub:
+            enrich_bars_with_greeks(bars, contract, CONFIG, ub)
+            underlying_bars_map[contract['symbol']] = ub
+
+    # Build params from META defaults, apply overrides
+    params = {p['key']: p['default'] for p in META.get('params', [])}
+    params.update(body.get('params', {}) or {})
+    params['_contract'] = contract
+    params['_config']   = CONFIG
+    params['_cache']    = {'underlyingBars': underlying_bars_map}
+    params.setdefault('eodMode', CONFIG.get('defaults', {}).get('eodMode', 'daily'))
+
+    if callable(validate):
+        try:
+            err = validate(params)
+        except Exception as e:
+            return jsonify({'error': f'validate() raised: {type(e).__name__}: {e}'}), 400
+        if err:
+            return jsonify({'error': f'Param error: {err}'}), 400
+
+    # Wrap as a duck-typed strategy module
+    from types import SimpleNamespace
+    strategy_module = SimpleNamespace(
+        META=META,
+        validate=validate or (lambda p: None),
+        execute=execute_fn,
+    )
+
+    try:
+        result = process_contract(contract, bars, strategy_module, params, qty)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc(limit=6)
+        return jsonify({
+            'error':     f'Strategy execution error: {type(e).__name__}: {e}',
+            'traceback': tb,
+        }), 500
+
+    if not result:
+        return jsonify({'error': 'Strategy did not return a result (entry bar not found?)'}), 500
+
     stop_trace   = result.pop('stopTrace', [])
     extra_traces = result.pop('extraTraces', {})
     return jsonify({

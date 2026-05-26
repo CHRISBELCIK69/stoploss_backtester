@@ -44,6 +44,9 @@
   <!-- Aggregate stats across all contracts (populated after run) -->
   <div id="aggregateResults"></div>
 
+  <!-- Global apply zone — toggle a strategy across every contract at once -->
+  <div id="applyZone"></div>
+
   <!-- Results get injected here per contract -->
   <div id="contractResults"></div>
 
@@ -126,23 +129,35 @@ function blendColors(baseColor, toColor, mix, alpha = 0.7) {
 }
 
 // Map an extra-trace name to its semantic role color.
-// SAFETY = warm red tint (downside protection)
-// TARGET = cool green tint (upside / profit lock)
-// NEUTRAL = strategy color with reduced opacity (no role inferred)
-const ROLE_SAFETY = '#e24b4a';   // red
-const ROLE_TARGET = '#1d9e75';   // green
+// Goal: at a glance, the SHAPE/POSITION of the line tells you which strategy
+// it belongs to; the COLOR tells you what role it plays. Previously we
+// blended the strategy color with the role color — that made hard stops,
+// arms, trails all look like washed-out shades of the same hue. Now each
+// role gets a pure, saturated, color-blind-friendly color.
+//
+// ORDER MATTERS — first regex match wins. Put more specific patterns first.
+const TRACE_ROLES = [
+  { re: /(^hard|^initial.*stop|^lower\s|^bollinger.*stop|t1.*stop)/i, color: 'rgba(239, 68, 68, 0.95)',  label: 'safety' },   // red
+  { re: /(trail)/i,                                                   color: 'rgba(251, 146, 60, 0.95)', label: 'trail'  },   // orange
+  { re: /(target|^upper|^arm|profit|^t[23]|lock)/i,                   color: 'rgba(34, 197, 94, 0.95)',  label: 'target' },   // green
+  { re: /(stage|break.even|floor)/i,                                  color: 'rgba(132, 204, 22, 0.95)', label: 'stage'  },   // lime
+  { re: /(delta)/i,                                                   color: 'rgba(167, 139, 250, 0.95)', label: 'delta' },   // purple
+  { re: /(gamma)/i,                                                   color: 'rgba(217, 70, 239, 0.95)', label: 'gamma' },   // fuchsia
+  { re: /(theta)/i,                                                   color: 'rgba(244, 114, 182, 0.95)', label: 'theta' },   // pink
+  { re: /(vega|iv)/i,                                                 color: 'rgba(56, 189, 248, 0.95)',  label: 'vega'  },   // sky
+  { re: /(charm|vanna)/i,                                             color: 'rgba(248, 113, 113, 0.95)', label: 'charm' },   // light red
+  { re: /(vwap|cross|^ma)/i,                                          color: 'rgba(34, 211, 238, 0.95)',  label: 'flow'  },   // cyan
+  { re: /(stddev|deviation|atr|spike|volat)/i,                        color: 'rgba(250, 204, 21, 0.95)',  label: 'vol'   },   // yellow
+  { re: /(time|decay|eod|dte|session|calendar)/i,                     color: 'rgba(45, 212, 191, 0.95)',  label: 'time'  },   // teal
+];
+
 function extraColorForRole(strategyColor, traceName) {
-  const r = (traceName || '').toLowerCase();
-  // Safety-net patterns: hard/initial stops, lower band
-  if (/(^hard|^initial.*stop|^lower|t1.*stop|^bollinger.*stop)/.test(r)) {
-    return blendColors(strategyColor, ROLE_SAFETY, 0.55, 0.75);
+  const r = (traceName || '');
+  for (const role of TRACE_ROLES) {
+    if (role.re.test(r)) return role.color;
   }
-  // Target / upside patterns: profit targets, upper band, break-even, floors, stage locks
-  if (/(target|^upper|^arm|profit|stage|break|floor|^t2|^t3|lock)/.test(r)) {
-    return blendColors(strategyColor, ROLE_TARGET, 0.45, 0.7);
-  }
-  // Neutral fallback — translucent strategy color
-  return blendColors(strategyColor, strategyColor, 0, 0.55);
+  // Fallback — desaturated grey-tinted strategy color
+  return blendColors(strategyColor, '#9ca3af', 0.5, 0.85);
 }
 
 // Strategy family detection. Handles three cases:
@@ -224,9 +239,22 @@ const FAMILY_LABELS = {
   'charm_exit':         'Charm',
   'vanna_exposure':     'Vanna',
   'delta_trail':        'Delta trail',
+  // Family 5 — Volatility-based
+  'iv_crush_exit':      'IV crush',
+  'rv_iv_divergence':   'RV/IV diverge',
+  'hv_percentile_exit': 'HV percentile',
+  'vol_skew_change':    'Skew change',
   // Family 6 — Composite / Conditional
   'delta_dte_and':      'Delta AND DTE',
   'gamma_or_hardstop':  'Gamma OR stop',
+  'tiered_stop':        'Tiered',
+  'regime_stop':        'IV regime',
+  'delta_divergence':   'Delta diverge',
+  // Family 7 — Strategy-specific
+  'iron_condor_wing':   'IC wing',
+  'spread_width_stop':  'Spread width',
+  'calendar_iv_diff':   'Calendar IV',
+  'diagonal_roll':      'Diagonal roll',
 };
 
 // Per-contract visibility filter — strategy ID → bool (only false hides)
@@ -449,6 +477,14 @@ function onChipClick(e, contractId, strategyIdx, strategyId) {
     idxList.forEach(i => chart.setDatasetVisibility(i, willShow));
     chart.update();
     setChipState(contractId, strategyId, willShow);
+    syncApplyZoneStates();
+    // Track most recently activated chip — code-fit editor uses this
+    // to know which strategy's source to load when zoom is opened.
+    if (willShow) _lastChipActivated[contractId] = strategyId;
+    // If we're already zoomed in on this contract, hot-swap the editor
+    if (_expandedContractId === contractId && willShow) {
+      loadStrategySource(contractId, strategyId);
+    }
   }, 200);
 }
 
@@ -466,7 +502,7 @@ function onChipDblClick(e, contractId, strategyIdx, strategyId) {
 function soloStrategy(contractId, strategyId) {
   const chart = findChartForContract(contractId);
   if (!chart) return;
-  const chips = document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`);
+  const chips = document.querySelectorAll(`.strategy-chip:not(.apply-chip)[data-contract="${contractId}"]`);
 
   // strategyId === null means "show all"
   chips.forEach(chip => {
@@ -478,6 +514,13 @@ function soloStrategy(contractId, strategyId) {
     chip.classList.toggle('off', !visible);
   });
   chart.update();
+  syncApplyZoneStates();
+  if (strategyId) {
+    _lastChipActivated[contractId] = strategyId;
+    if (_expandedContractId === contractId) {
+      loadStrategySource(contractId, strategyId);
+    }
+  }
 }
 
 // Render chip wall grouped by strategy family.
@@ -524,6 +567,7 @@ function renderChipFamilies(contractId, strategies) {
 
 // Apply chip filters (winners/losers/eod) for a contract.
 // Hides matching chips AND hides their chart lines.
+// Composes with the chip search input — chips hidden by either source stay hidden.
 function applyChipFilters(contractId) {
   const showWin  = document.getElementById(`${contractId}_f_win`).checked;
   const showLoss = document.getElementById(`${contractId}_f_loss`).checked;
@@ -539,19 +583,48 @@ function applyChipFilters(contractId) {
     const isLoss = pnl < 0;
     const isEod  = reason === 'eod';
 
-    let visible = true;
-    if (isWin  && !showWin)  visible = false;
-    if (isLoss && !showLoss) visible = false;
-    if (isEod  && !showEod)  visible = false;
+    let pnlVisible = true;
+    if (isWin  && !showWin)  pnlVisible = false;
+    if (isLoss && !showLoss) pnlVisible = false;
+    if (isEod  && !showEod)  pnlVisible = false;
 
-    chip.style.display = visible ? '' : 'none';
-    // Hide chart lines for filtered-out chips
-    if (!visible && chart) {
+    chip.dataset.pnlHidden = pnlVisible ? '' : '1';
+    // Hide chart lines for chips removed by the win/loss/eod filter
+    // (search-hidden chips don't touch chart line visibility)
+    if (!pnlVisible && chart) {
       findStrategyDatasets(chart, sid).forEach(idx => chart.setDatasetVisibility(idx, false));
       chip.classList.add('off');
     }
   });
 
+  if (chart) chart.update();
+  applyChipSearchVisibility(contractId);
+  syncApplyZoneStates();
+}
+
+// Chip search — per-contract. Hides chips whose strategy id/name does not
+// contain the query substring. Composes with applyChipFilters (winner/loser/eod).
+// State is held in chip.dataset.searchHidden so other filters can read it.
+function onChipSearchInput(contractId, value) {
+  const chip = document.getElementById(`${contractId}_chip_search`);
+  if (chip) chip.value = value;   // ensures programmatic restore works too
+  // Persist per contract slot so a re-run keeps the filter
+  try { localStorage.setItem('backtester_chip_search_' + contractId, value); } catch (_) {}
+  applyChipSearchVisibility(contractId);
+}
+
+function applyChipSearchVisibility(contractId) {
+  const input = document.getElementById(`${contractId}_chip_search`);
+  const q = (input ? input.value : '').trim().toLowerCase();
+  document.querySelectorAll(`.strategy-chip[data-contract="${contractId}"]`).forEach(chip => {
+    const sid  = (chip.getAttribute('data-strategy') || '').toLowerCase();
+    const name = (chip.querySelector('.chip-name')?.textContent || '').toLowerCase();
+    const matches = !q || sid.includes(q) || name.includes(q);
+    chip.dataset.searchHidden = matches ? '' : '1';
+    // Final display = hidden if EITHER source flagged it
+    const hidden = chip.dataset.searchHidden || chip.dataset.pnlHidden;
+    chip.style.display = hidden ? 'none' : '';
+  });
   // Hide family wrappers whose chips are all hidden
   document.querySelectorAll(`.chip-family[data-contract="${contractId}"]`).forEach(fam => {
     const anyVisible = Array.from(
@@ -559,8 +632,6 @@ function applyChipFilters(contractId) {
     ).some(c => c.style.display !== 'none');
     fam.style.display = anyVisible ? '' : 'none';
   });
-
-  if (chart) chart.update();
 }
 
 // Toggle every chip in a family on/off together.
@@ -568,7 +639,7 @@ function toggleFamily(contractId, family) {
   const chart = findChartForContract(contractId);
   if (!chart) return;
   const chips = document.querySelectorAll(
-    `.strategy-chip[data-contract="${contractId}"][data-family="${family}"]`
+    `.strategy-chip:not(.apply-chip)[data-contract="${contractId}"][data-family="${family}"]`
   );
   // Decide direction based on the first VISIBLE chip's state
   const firstVisible = Array.from(chips).find(c => c.style.display !== 'none');
@@ -582,6 +653,7 @@ function toggleFamily(contractId, family) {
     chip.classList.toggle('off', !willShow);
   });
   chart.update();
+  syncApplyZoneStates();
 }
 
 function toggleAllStrategies(contractId, visible) {
@@ -596,7 +668,457 @@ function toggleAllStrategies(contractId, visible) {
     chip.classList.toggle('off', !visible);
   });
   chart.update();
+  syncApplyZoneStates();
 }
+
+// ── Apply zone — global chips that toggle a strategy across every contract ──
+//
+// Three-state per strategy:
+//   'all'    — every contract has this strategy visible
+//   'none'   — every contract has it hidden
+//   'mixed'  — some contracts show it, others don't (yellow indicator)
+//
+// Click cycles: all → none → all  (mixed → all on first click).
+// State is derived from per-contract chip .off class on every render.
+
+let lastApplyZoneContracts = null;
+
+function renderApplyZone(contracts) {
+  lastApplyZoneContracts = contracts;
+  const zone = document.getElementById('applyZone');
+  if (!zone) return;
+  if (!contracts || contracts.length < 1) { zone.innerHTML = ''; return; }
+
+  // Build a unique strategy list: first-seen order across all contracts.
+  // For each strategy keep a representative name + family + original index
+  // so we get the same color as on per-contract chips.
+  const seen = {};
+  const order = [];
+  contracts.forEach(c => {
+    (c.strategies || []).forEach((s, si) => {
+      if (seen[s.strategyId]) return;
+      seen[s.strategyId] = { strategyId: s.strategyId, strategyName: s.strategyName, _si: si };
+      order.push(s.strategyId);
+    });
+  });
+
+  // Group by family — same resolver as per-contract chips
+  const groups = {};
+  const famOrder = [];
+  order.forEach(sid => {
+    const r = seen[sid];
+    const fam = strategyFamily(sid);
+    if (!groups[fam]) { groups[fam] = []; famOrder.push(fam); }
+    groups[fam].push(r);
+  });
+
+  const groupsHtml = famOrder.map(fam => {
+    const label = FAMILY_LABELS[fam] || fam.replace(/_/g, ' ');
+    const items = groups[fam];
+    const chips = items.map(r => {
+      const col = COLORS[r._si % COLORS.length];
+      return `
+        <label class="strategy-chip apply-chip off"
+               data-strategy="${r.strategyId}" data-family="${fam}"
+               style="--chip-color:${col}"
+               onclick="onApplyChipClick('${r.strategyId}')"
+               title="Click to toggle '${r.strategyName}' on every contract">
+          <span class="chip-dot" style="background:${col}"></span>
+          <span class="chip-name">${r.strategyName}</span>
+        </label>`;
+    }).join('');
+    return `
+      <div class="chip-family apply-family" data-family="${fam}">
+        <span class="family-label" onclick="onApplyFamilyClick('${fam}')">
+          ${label}<span class="family-count">${items.length}</span>
+        </span>
+        <div class="chip-family-row">${chips}</div>
+      </div>`;
+  }).join('');
+
+  zone.innerHTML = `
+    <div class="card apply-zone">
+      <div class="section-label">Apply to all contracts (${contracts.length})</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Global:</span>
+        <button class="toggle-btn-mini" onclick="applyAllContractsAll(true)">All</button>
+        <button class="toggle-btn-mini" onclick="applyAllContractsAll(false)">None</button>
+        <input type="text" class="chip-search" id="apply_chip_search"
+               placeholder="Search strategies…"
+               oninput="onApplyChipSearchInput(this.value)" />
+        <span style="font-size:11px;color:var(--text-muted);margin-left:auto">click chip = toggle on every contract &middot; yellow dot = mixed state</span>
+      </div>
+      ${groupsHtml}
+    </div>
+  `;
+
+  // Restore search query from localStorage and re-apply visibility
+  const saved = localStorage.getItem('backtester_apply_search') || '';
+  const inp = document.getElementById('apply_chip_search');
+  if (inp) inp.value = saved;
+  applyApplyZoneSearchVisibility();
+  syncApplyZoneStates();
+}
+
+// Click on a global apply-chip — toggles that strategy on every contract.
+// Determined direction: if any contract currently shows it, hide all; else show all.
+function onApplyChipClick(strategyId) {
+  const someOn = isStrategyVisibleSomewhere(strategyId);
+  applyStrategyToAll(strategyId, !someOn);
+}
+
+// Click on a global family label — toggles every chip in that family across all contracts.
+function onApplyFamilyClick(family) {
+  const chips = document.querySelectorAll(`.apply-chip[data-family="${family}"]`);
+  // If any chip in the family is "all on", we hide all; otherwise show all.
+  let anyOn = false;
+  chips.forEach(chip => {
+    const sid = chip.getAttribute('data-strategy');
+    if (isStrategyVisibleSomewhere(sid)) anyOn = true;
+  });
+  chips.forEach(chip => {
+    const sid = chip.getAttribute('data-strategy');
+    applyStrategyToAll(sid, !anyOn);
+  });
+}
+
+function isStrategyVisibleSomewhere(strategyId) {
+  const chips = document.querySelectorAll(
+    `.strategy-chip:not(.apply-chip)[data-strategy="${strategyId}"]`
+  );
+  for (const c of chips) if (!c.classList.contains('off')) return true;
+  return false;
+}
+
+function applyStrategyToAll(strategyId, visible) {
+  // Iterate every per-contract chip with this strategyId and flip its chart line
+  const chips = document.querySelectorAll(
+    `.strategy-chip:not(.apply-chip)[data-strategy="${strategyId}"]`
+  );
+  const touchedCharts = new Set();
+  chips.forEach(chip => {
+    const cid = chip.getAttribute('data-contract');
+    const chart = findChartForContract(cid);
+    if (!chart) return;
+    findStrategyDatasets(chart, strategyId).forEach(idx => {
+      chart.setDatasetVisibility(idx, visible);
+    });
+    chip.classList.toggle('off', !visible);
+    touchedCharts.add(chart);
+  });
+  touchedCharts.forEach(ch => ch.update());
+  syncApplyZoneStates();
+}
+
+function applyAllContractsAll(visible) {
+  // Every strategy on every contract
+  const ids = new Set();
+  document.querySelectorAll('.strategy-chip:not(.apply-chip)').forEach(c => {
+    ids.add(c.getAttribute('data-strategy'));
+  });
+  ids.forEach(sid => applyStrategyToAll(sid, visible));
+}
+
+// Recompute each global chip's three-state class from per-contract chip state.
+function syncApplyZoneStates() {
+  document.querySelectorAll('.apply-chip').forEach(chip => {
+    const sid = chip.getAttribute('data-strategy');
+    const perContract = document.querySelectorAll(
+      `.strategy-chip:not(.apply-chip)[data-strategy="${sid}"]`
+    );
+    let onCount = 0, offCount = 0;
+    perContract.forEach(c => {
+      if (c.classList.contains('off')) offCount++;
+      else onCount++;
+    });
+    chip.classList.remove('off', 'mixed');
+    if (onCount === 0)          chip.classList.add('off');
+    else if (offCount > 0)      chip.classList.add('mixed');
+  });
+}
+
+function onApplyChipSearchInput(value) {
+  localStorage.setItem('backtester_apply_search', value);
+  applyApplyZoneSearchVisibility();
+}
+
+function applyApplyZoneSearchVisibility() {
+  const inp = document.getElementById('apply_chip_search');
+  const q = (inp ? inp.value : '').trim().toLowerCase();
+  document.querySelectorAll('.apply-chip').forEach(chip => {
+    const sid  = (chip.getAttribute('data-strategy') || '').toLowerCase();
+    const name = (chip.querySelector('.chip-name')?.textContent || '').toLowerCase();
+    const visible = !q || sid.includes(q) || name.includes(q);
+    chip.style.display = visible ? '' : 'none';
+  });
+  document.querySelectorAll('.apply-family').forEach(fam => {
+    const any = Array.from(fam.querySelectorAll('.apply-chip')).some(c => c.style.display !== 'none');
+    fam.style.display = any ? '' : 'none';
+  });
+}
+
+// ── Expand-to-fullscreen modal for a contract ─────────
+// CSS-only approach: toggle .expanded on the contract card. Chart.js
+// resizes automatically (responsive: true, maintainAspectRatio: false)
+// but we still call chart.resize() defensively after a frame.
+let _expandedContractId = null;
+
+// Track the most recently activated chip per contract so the zoom view
+// can default to "show the strategy the user just toggled on".
+const _lastChipActivated = {};
+
+// Cache of fetched original source by strategyId — avoids re-hitting the
+// backend when the user toggles between strategies in the same session.
+// { strategyId: { id, name, description, source, header_comment, needs_greeks } }
+const _strategySourceCache = {};
+
+function fitStorageKey(contractId, strategyId) {
+  return `backtester_fit_code_${contractId}__${strategyId}`;
+}
+
+async function fetchStrategySource(strategyId) {
+  if (_strategySourceCache[strategyId]) return _strategySourceCache[strategyId];
+  const resp = await fetch(`/api/strategy_source/${encodeURIComponent(strategyId)}`);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || 'failed to fetch source');
+  _strategySourceCache[strategyId] = data;
+  return data;
+}
+
+// Populate the editor + rundown for `strategyId` on contract `contractId`.
+// If the user has previously edited this strategy on this contract, restore
+// that edit from localStorage; otherwise load the on-disk original.
+async function loadStrategySource(contractId, strategyId) {
+  const ta = document.getElementById(`${contractId}_fit_code`);
+  const rundown = document.getElementById(`${contractId}_fit_rundown`);
+  const select  = document.getElementById(`${contractId}_fit_select`);
+  const flag    = document.getElementById(`${contractId}_fit_loaded_flag`);
+  if (!ta || !rundown) return;
+
+  rundown.innerHTML = '<span style="color:var(--text-muted)">Loading rundown…</span>';
+  ta.value = '';
+
+  let data;
+  try {
+    data = await fetchStrategySource(strategyId);
+  } catch (e) {
+    rundown.innerHTML = `<span class="neg">Failed to load: ${e.message}</span>`;
+    return;
+  }
+
+  // Render rundown: short description + the file's leading comment block
+  const headerHtml = (data.header_comment || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  rundown.innerHTML = `
+    <div class="fit-rundown-head">
+      <span class="fit-rundown-name">${data.name}</span>
+      <span class="fit-rundown-id">${data.id}</span>
+      ${data.needs_greeks ? '<span class="fit-rundown-tag">needs greeks</span>' : ''}
+    </div>
+    <div class="fit-rundown-desc">${data.description || ''}</div>
+    <pre class="fit-rundown-header">${headerHtml}</pre>
+  `;
+
+  // Load editor — prefer user's edits from localStorage, else original source
+  let saved = '';
+  try { saved = localStorage.getItem(fitStorageKey(contractId, strategyId)) || ''; } catch (_) {}
+  ta.value = saved || data.source;
+
+  if (select && select.value !== strategyId) select.value = strategyId;
+  if (flag) {
+    flag.textContent = saved ? '· edited' : '· original';
+    flag.className = 'fit-loaded-flag ' + (saved ? 'edited' : 'clean');
+  }
+
+  // Bind autosave for THIS strategy slot. Rebind on every load so the
+  // key matches the currently-loaded strategy.
+  ta.oninput = () => {
+    try { localStorage.setItem(fitStorageKey(contractId, strategyId), ta.value); } catch (_) {}
+    const isEdited = ta.value !== data.source;
+    if (flag) {
+      flag.textContent = isEdited ? '· edited' : '· original';
+      flag.className = 'fit-loaded-flag ' + (isEdited ? 'edited' : 'clean');
+    }
+  };
+}
+
+function onFitStrategyChange(contractId, strategyId) {
+  loadStrategySource(contractId, strategyId);
+}
+
+function resetFitToOriginal(contractId) {
+  const select = document.getElementById(`${contractId}_fit_select`);
+  if (!select) return;
+  const sid = select.value;
+  try { localStorage.removeItem(fitStorageKey(contractId, sid)); } catch (_) {}
+  // Force a reload — clear cache for that strategy so we re-fetch the canonical source
+  delete _strategySourceCache[sid];
+  loadStrategySource(contractId, sid);
+}
+
+async function runCustomStrategy(contractId) {
+  const zone = document.getElementById(`${contractId}_fit_zone`);
+  const ta   = document.getElementById(`${contractId}_fit_code`);
+  const out  = document.getElementById(`${contractId}_fit_result`);
+  if (!zone || !ta) return;
+
+  const code      = ta.value;
+  const occ       = zone.getAttribute('data-occ');
+  const entryDate = zone.getAttribute('data-entry-date');
+  const entryTime = zone.getAttribute('data-entry-time');
+
+  out.innerHTML = `<span style="color:var(--text-secondary)">Running…</span>`;
+  try {
+    const resp = await fetch('/api/run_custom_strategy', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        occ, entryDate, expiry: entryDate, entryTime,
+        code, qty: 1,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      out.innerHTML = `<span class="neg">${(data.error || 'unknown').toString()
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>`;
+      if (data.traceback) out.innerHTML += `<pre class="fit-traceback">${data.traceback
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre>`;
+      return;
+    }
+    const r = data.result;
+    const cls = r.pnl >= 0 ? 'pos' : 'neg';
+    out.innerHTML = `
+      Entry $${r.entryPrice.toFixed(2)} → Exit $${r.exitPrice.toFixed(2)} &nbsp;
+      <span class="${cls}" style="font-weight:600;font-family:var(--font-mono)">${fmtDollars(r.pnl)}</span>
+      <span class="${cls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</span>
+      ${badgeFor(r.exitReason)}
+      <span style="color:var(--text-muted);font-size:11px">${fmtTs(r.exitTs)}</span>`;
+    overlayCustomResultOnChart(contractId, r);
+  } catch (e) {
+    out.innerHTML = `<span class="neg">Request failed: ${e.message}</span>`;
+  }
+}
+
+function overlayCustomResultOnChart(contractId, result) {
+  const chart = findChartForContract(contractId);
+  if (!chart) return;
+  // Wipe any prior custom overlay
+  chart.data.datasets = chart.data.datasets.filter(d => !d.isCustomResult);
+
+  const labels = chart.data.labels;
+  const labelsLen = labels.length;
+  const barTimes = chart.data.datasets[0]?._barTimes || [];
+  const timeIdx = {};
+  barTimes.forEach((t, i) => { timeIdx[t] = i; });
+
+  const trace  = result.stopTrace || [];
+  const stopData = new Array(labelsLen).fill(null);
+  trace.forEach(t => {
+    const idx = timeIdx[t.time];
+    if (idx !== undefined) stopData[idx] = t.stopPrice;
+  });
+
+  let exitIdx = -1;
+  if (result.exitTs && timeIdx[result.exitTs] !== undefined) exitIdx = timeIdx[result.exitTs];
+
+  chart.data.datasets.push({
+    label: `Custom fit · P&L ${fmtDollars(result.pnl)}`,
+    data: stopData,
+    borderColor: '#fb923c',     // orange — distinct from amber Bracket Lab
+    backgroundColor: 'transparent',
+    pointRadius: stopData.map((v, i) => i === exitIdx ? 12 : 0),
+    pointStyle:  stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+    pointBackgroundColor: '#fb923c',
+    pointBorderColor: '#ffffff',
+    pointBorderWidth: stopData.map((v, i) => i === exitIdx ? 3 : 0),
+    pointHoverRadius: stopData.map((v, i) => i === exitIdx ? 14 : 0),
+    borderWidth: 2.5,
+    borderDash: [6, 3],
+    tension: 0.1,
+    spanGaps: true,
+    isCustomResult: true,
+    order: -4,
+  });
+  chart.update();
+}
+
+function clearCustomStrategy(contractId) {
+  const chart = findChartForContract(contractId);
+  if (chart) {
+    chart.data.datasets = chart.data.datasets.filter(d => !d.isCustomResult);
+    chart.update();
+  }
+  const out = document.getElementById(`${contractId}_fit_result`);
+  if (out) out.innerHTML = '';
+}
+
+function expandContract(contractId) {
+  if (_expandedContractId && _expandedContractId !== contractId) {
+    collapseContract();
+  }
+  const card = document.getElementById(`${contractId}_card`);
+  if (!card) return;
+  card.classList.add('expanded');
+  document.body.classList.add('expanded-open');
+
+  // Inject a close button if not already there
+  if (!card.querySelector('.expand-close')) {
+    const btn = document.createElement('button');
+    btn.className = 'expand-close';
+    btn.innerHTML = '✕  Close (Esc)';
+    btn.onclick = collapseContract;
+    card.appendChild(btn);
+  }
+  _expandedContractId = contractId;
+
+  // Pick which strategy to load into the fit editor:
+  //   1. The chip the user most recently clicked on (tracked in _lastChipActivated)
+  //   2. Else: the first chip that is currently "on" (visible on the chart)
+  //   3. Else: the first chip in the list (fallback)
+  let sid = _lastChipActivated[contractId];
+  if (!sid) {
+    const onChip = document.querySelector(
+      `.strategy-chip:not(.apply-chip)[data-contract="${contractId}"]:not(.off)`
+    );
+    if (onChip) sid = onChip.getAttribute('data-strategy');
+  }
+  if (!sid) {
+    const anyChip = document.querySelector(
+      `.strategy-chip:not(.apply-chip)[data-contract="${contractId}"]`
+    );
+    if (anyChip) sid = anyChip.getAttribute('data-strategy');
+  }
+  if (sid) loadStrategySource(contractId, sid);
+
+  // Resize chart to fill new container after CSS layout settles
+  requestAnimationFrame(() => {
+    const chart = findChartForContract(contractId);
+    if (chart) chart.resize();
+  });
+}
+
+function collapseContract() {
+  if (!_expandedContractId) return;
+  const card = document.getElementById(`${_expandedContractId}_card`);
+  if (card) {
+    card.classList.remove('expanded');
+    const btn = card.querySelector('.expand-close');
+    if (btn) btn.remove();
+  }
+  document.body.classList.remove('expanded-open');
+  const id = _expandedContractId;
+  _expandedContractId = null;
+
+  requestAnimationFrame(() => {
+    const chart = findChartForContract(id);
+    if (chart) chart.resize();
+  });
+}
+
+// Global Esc to collapse
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _expandedContractId) collapseContract();
+});
 
 function fmtDollars(v) { return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2); }
 function fmtTs(ts) { return ts.replace('T', ' ').slice(0, 16); }
@@ -648,7 +1170,7 @@ function renderContractBlock(c, idx) {
   });
 
   return `
-    <div class="card" style="margin-top:20px">
+    <div class="card contract-card" id="${id}_card" style="margin-top:20px">
       <div class="section-label" style="font-size:13px;letter-spacing:0">${c.occ} &nbsp;&mdash;&nbsp; entry ${c.entryDate} ${c.entryTime} CST</div>
 
       <!-- Strategy toggle bar (all OFF by default — click to show) -->
@@ -662,6 +1184,9 @@ function renderContractBlock(c, idx) {
           <label class="filter-pill pos"><input type="checkbox" id="${id}_f_win"  checked onchange="applyChipFilters('${id}')"> Winners</label>
           <label class="filter-pill neg"><input type="checkbox" id="${id}_f_loss" checked onchange="applyChipFilters('${id}')"> Losers</label>
           <label class="filter-pill"    ><input type="checkbox" id="${id}_f_eod"  checked onchange="applyChipFilters('${id}')"> EOD-held</label>
+          <input type="text" class="chip-search" id="${id}_chip_search"
+                 placeholder="Search strategies…"
+                 oninput="onChipSearchInput('${id}', this.value)" />
           <span style="font-size:11px;color:var(--text-muted);margin-left:auto">click chip to show &middot; double-click to solo &middot; click family name to toggle group</span>
         </div>
         ${renderChipFamilies(id, strategies)}
@@ -672,9 +1197,12 @@ function renderContractBlock(c, idx) {
         <div style="font-size:11px;color:var(--text-secondary)">
           Drag to box-zoom &middot; Wheel to zoom &middot; Shift+drag to pan &middot; ${strategies.length} strategies
         </div>
-        <button class="run-btn" style="padding:4px 12px;font-size:11px;margin:0" onclick="resetZoom('${id}_chart')">Reset zoom</button>
+        <div style="display:flex;gap:6px">
+          <button class="run-btn" style="padding:4px 12px;font-size:11px;margin:0" onclick="resetZoom('${id}_chart')">Reset zoom</button>
+          <button class="run-btn" style="padding:4px 12px;font-size:11px;margin:0;background:var(--bg-card);color:var(--text)" onclick="expandContract('${id}')">⤢ Expand</button>
+        </div>
       </div>
-      <div style="height:620px;margin-bottom:20px"><canvas id="${id}_chart"></canvas></div>
+      <div class="chart-wrap" id="${id}_chart_wrap" style="height:620px;margin-bottom:20px"><canvas id="${id}_chart"></canvas></div>
 
       <!-- ── Bracket Lab — interactive TP/SL slider ──────────── -->
       <div class="bracket-lab" id="${id}_lab" data-occ="${c.occ}" data-entry-date="${c.entryDate}"
@@ -703,7 +1231,7 @@ function renderContractBlock(c, idx) {
       </div>
 
       <!-- Strategy how-it-works -->
-      <div style="margin-bottom:16px">
+      <div class="how-it-works" style="margin-bottom:16px">
         <div class="section-label">How each strategy works</div>
         ${strategies.map((r, si) => `
           <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;font-size:12px">
@@ -725,6 +1253,38 @@ function renderContractBlock(c, idx) {
           </tr></thead>
           <tbody>${summaryRows}</tbody>
         </table>
+      </div>
+
+      <!-- Code-fit zone — only visible in expanded (zoom) view.
+           Loads the source of the currently-selected strategy and lets the
+           user edit + re-run it against THIS contract. Overlays the result
+           on the chart in orange. -->
+      <div class="code-fit-zone" id="${id}_fit_zone"
+           data-occ="${c.occ}" data-entry-date="${c.entryDate}"
+           data-entry-time="${c.entryTime}">
+        <div class="fit-header">
+          <span class="fit-title">Fit a strategy on this contract</span>
+          <span class="fit-help">Pick a strategy, edit its code, hit Run — overlay shows on the chart in orange.</span>
+        </div>
+        <div class="fit-toolbar">
+          <label class="fit-toolbar-label">Strategy:</label>
+          <select class="fit-strategy-select" id="${id}_fit_select"
+                  onchange="onFitStrategyChange('${id}', this.value)">
+            ${strategies.map(s => `<option value="${s.strategyId}">${s.strategyName}</option>`).join('')}
+          </select>
+          <span class="fit-loaded-flag" id="${id}_fit_loaded_flag"></span>
+        </div>
+        <div class="fit-rundown" id="${id}_fit_rundown">
+          <span style="color:var(--text-muted)">Loading rundown…</span>
+        </div>
+        <textarea class="fit-editor" id="${id}_fit_code" spellcheck="false"
+                  placeholder="Loading strategy source…"></textarea>
+        <div class="fit-controls">
+          <button class="run-btn fit-run-btn" onclick="runCustomStrategy('${id}')">▶ Run on contract</button>
+          <button class="toggle-btn-mini" onclick="clearCustomStrategy('${id}')">Clear overlay</button>
+          <button class="toggle-btn-mini" onclick="resetFitToOriginal('${id}')">Reset to original</button>
+          <span class="fit-result" id="${id}_fit_result"></span>
+        </div>
       </div>
     </div>
   `;
@@ -937,10 +1497,111 @@ function buildChart(c, idx) {
     },
   };
 
+  // Inline trace labels — draw a small pill at the rightmost visible point
+  // of every visible line so the user can read each role at a glance.
+  // Skips if too many lines are visible (>16) to avoid clutter — the chip
+  // toggle is the answer there. Vertical de-overlap so labels never stack on
+  // top of each other.
+  const inlineTraceLabels = {
+    id: 'inlineTraceLabels',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      const skipLabels = new Set(['High', 'Low', 'Entry price']);
+
+      // Collect candidate labels first
+      const labels = [];
+      chart.data.datasets.forEach((ds, dsIdx) => {
+        if (!chart.isDatasetVisible(dsIdx)) return;
+        if (skipLabels.has(ds.label)) return;
+
+        const meta = chart.getDatasetMeta(dsIdx);
+        const data = ds.data || [];
+
+        // Find the last non-null point INSIDE the current x-axis view —
+        // when the user zooms, labels stay anchored to the right edge of
+        // what they can actually see, not the dataset's true tail.
+        let lastIdx = -1;
+        for (let i = data.length - 1; i >= 0; i--) {
+          if (data[i] === null || data[i] === undefined) continue;
+          const p = meta.data[i];
+          if (!p) continue;
+          if (p.x < chartArea.left - 4 || p.x > chartArea.right + 4) continue;
+          lastIdx = i;
+          break;
+        }
+        if (lastIdx === -1) return;
+
+        const point = meta.data[lastIdx];
+        if (!point) return;
+        if (point.y < chartArea.top || point.y > chartArea.bottom) return;
+
+        // Build display text — strip "Strategy · " prefix from extras so
+        // labels stay short ("Hard stop $5.20" not "trailing_pct · Hard stop $5.20")
+        let text = ds.label || '';
+        const dotIdx = text.indexOf(' · ');
+        if (dotIdx !== -1) text = text.slice(dotIdx + 3);
+        text += ` $${Number(data[lastIdx]).toFixed(2)}`;
+
+        labels.push({
+          x: point.x,
+          y: point.y,
+          text,
+          color: ds.borderColor || '#fff',
+        });
+      });
+
+      // Too many visible lines — labels would be noise; skip
+      if (labels.length === 0 || labels.length > 16) return;
+
+      // Vertical de-overlap — sort by y, then push collisions down
+      labels.sort((a, b) => a.y - b.y);
+      const minSpacing = 16;
+      for (let i = 1; i < labels.length; i++) {
+        if (labels[i].y - labels[i - 1].y < minSpacing) {
+          labels[i].y = labels[i - 1].y + minSpacing;
+        }
+      }
+      // Clamp inside chart area
+      labels.forEach(l => {
+        if (l.y < chartArea.top + 8)    l.y = chartArea.top + 8;
+        if (l.y > chartArea.bottom - 8) l.y = chartArea.bottom - 8;
+      });
+
+      ctx.save();
+      ctx.font = 'bold 10px monospace';
+      ctx.textBaseline = 'middle';
+      const padX = 6;
+      const height = 16;
+      labels.forEach(lbl => {
+        const w = ctx.measureText(lbl.text).width;
+        let x0 = lbl.x + 10;
+        // If the label would overflow the right edge, anchor it to the left
+        if (x0 + w + padX * 2 > chartArea.right) {
+          x0 = chartArea.right - w - padX * 2 - 2;
+        }
+        const y0 = lbl.y - height / 2;
+        // Background pill (translucent black) + colored left stripe
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+        ctx.fillRect(x0, y0, w + padX * 2, height);
+        ctx.fillStyle = lbl.color;
+        ctx.fillRect(x0, y0, 3, height);
+        // Connector dot at the actual line endpoint
+        ctx.beginPath();
+        ctx.fillStyle = lbl.color;
+        ctx.arc(lbl.x, lbl.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Text
+        ctx.fillStyle = lbl.color;
+        ctx.fillText(lbl.text, x0 + padX + 2, y0 + height / 2);
+      });
+      ctx.restore();
+    },
+  };
+
   const chart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets },
-    plugins: [exitLabelPlugin],
+    plugins: [exitLabelPlugin, inlineTraceLabels],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -1298,7 +1959,9 @@ async function runBacktest() {
   document.getElementById('contractResults').innerHTML  = '';
   document.getElementById('aggregateResults').innerHTML = '';
   document.getElementById('timingResults').innerHTML    = '';
+  document.getElementById('applyZone').innerHTML        = '';
   document.getElementById('logCard').classList.add('hidden');
+  if (_expandedContractId) collapseContract();
 
   // Destroy old charts
   chartInstances.forEach(c => c.destroy());
@@ -1370,6 +2033,21 @@ async function runBacktest() {
     contracts.forEach((c, i) => {
       buildChart(c, i);
     });
+
+    // Restore per-contract chip search values (from this session's
+    // localStorage) and render the global apply zone
+    contracts.forEach((_, i) => {
+      const id = `contract_${i}`;
+      const saved = localStorage.getItem('backtester_chip_search_' + id) || '';
+      if (saved) {
+        const inp = document.getElementById(`${id}_chip_search`);
+        if (inp) {
+          inp.value = saved;
+          applyChipSearchVisibility(id);
+        }
+      }
+    });
+    renderApplyZone(contracts);
 
   } catch (e) {
     showError('Request failed: ' + e.message);
