@@ -69,10 +69,15 @@ def execute(bars, entry_idx, entry_price, params):
 
     contract = params.get('_contract', {})
     cfg      = params.get('_config', {})
+    cache    = params.get('_cache', {})
 
-    # ── ATR ──
+    # ── ATR (use shared cache when available) ──
     atr = None
-    if contract and cfg:
+    cached_daily = cache.get('dailyBars')
+    if cached_daily:
+        daily = cached_daily[-atr_days:] if len(cached_daily) > atr_days else cached_daily
+        atr = _compute_atr(daily)
+    elif contract and cfg:
         daily = fetch_daily_bars(contract.get('occ', ''), contract.get('entryDate', ''), atr_days, cfg)
         atr = _compute_atr(daily)
     if atr is None:

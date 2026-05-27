@@ -45,12 +45,21 @@ from strategies import (
 
     # Family 1 — Premium-based
     exit_premium_pct,
+    exit_premium_pct_25,
+    exit_premium_pct_50,
+    exit_premium_pct_75,
+    exit_premium_pct_100,
     exit_profit_target_pct,
     exit_premium_trail,
     exit_spread_widen,
 
     # Family 4 — Time-based
     exit_dte_threshold,
+    exit_dte_21,
+    exit_dte_14,
+    exit_dte_7,
+    exit_dte_5,
+    exit_dte_2,
     exit_calendar_event,
     exit_time_condition,
     exit_session_exit,
@@ -64,6 +73,9 @@ from strategies import (
 
     # Family 3 — Greeks-based
     exit_delta_threshold,
+    exit_delta_030,
+    exit_delta_040,
+    exit_delta_050,
     exit_gamma_spike,
     exit_vega_limit,
     exit_iv_rank,
@@ -77,6 +89,7 @@ from strategies import (
     exit_rv_iv_divergence,
     exit_hv_percentile,
     exit_vol_skew_change,
+    exit_vix_trigger,
 
     # Family 6 — Composite / Conditional
     exit_delta_dte_composite,
@@ -84,12 +97,15 @@ from strategies import (
     exit_tiered_stop,
     exit_regime_stop,
     exit_delta_divergence,
+    exit_portfolio_stop,
+    exit_or_composite,
 
     # Family 7 — Strategy-specific
     exit_iron_condor_wing,
     exit_spread_width_pct,
     exit_calendar_iv_diff,
     exit_diagonal_roll,
+    exit_ratio_spread,
 )
 
 # Order controls display order in CLI --list-strategies
@@ -128,12 +144,21 @@ _STRATEGIES = [
 
     # Family 1 — Premium-based
     exit_premium_pct,
+    exit_premium_pct_25,
+    exit_premium_pct_50,
+    exit_premium_pct_75,
+    exit_premium_pct_100,
     exit_profit_target_pct,
     exit_premium_trail,
     exit_spread_widen,
 
     # Family 4 — Time-based
     exit_dte_threshold,
+    exit_dte_21,
+    exit_dte_14,
+    exit_dte_7,
+    exit_dte_5,
+    exit_dte_2,
     exit_calendar_event,
     exit_time_condition,
     exit_session_exit,
@@ -147,6 +172,9 @@ _STRATEGIES = [
 
     # Family 3 — Greeks-based
     exit_delta_threshold,
+    exit_delta_030,
+    exit_delta_040,
+    exit_delta_050,
     exit_gamma_spike,
     exit_vega_limit,
     exit_iv_rank,
@@ -160,6 +188,7 @@ _STRATEGIES = [
     exit_rv_iv_divergence,
     exit_hv_percentile,
     exit_vol_skew_change,
+    exit_vix_trigger,
 
     # Family 6 — Composite / Conditional
     exit_delta_dte_composite,
@@ -167,12 +196,15 @@ _STRATEGIES = [
     exit_tiered_stop,
     exit_regime_stop,
     exit_delta_divergence,
+    exit_portfolio_stop,
+    exit_or_composite,
 
     # Family 7 — Strategy-specific
     exit_iron_condor_wing,
     exit_spread_width_pct,
     exit_calendar_iv_diff,
     exit_diagonal_roll,
+    exit_ratio_spread,
 ]
 
 # Build lookup map: id → module

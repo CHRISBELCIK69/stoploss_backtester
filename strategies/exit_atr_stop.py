@@ -90,10 +90,17 @@ def execute(bars, entry_idx, entry_price, params):
 
     contract = params.get('_contract', {})
     cfg      = params.get('_config', {})
+    cache    = params.get('_cache', {})
 
-    # ── Compute ATR from daily bars ──
+    # ── Compute ATR from daily bars (use shared cache when available) ──
+    # main.py pre-fetches daily bars per contract at MAX_ATR_DAYS so all
+    # ATR-using strategies share one fetch. We slice to our atr_days here.
     atr = None
-    if contract and cfg:
+    cached_daily = cache.get('dailyBars')
+    if cached_daily:
+        daily_bars = cached_daily[-atr_days:] if len(cached_daily) > atr_days else cached_daily
+        atr = _compute_atr(daily_bars)
+    elif contract and cfg:
         occ        = contract.get('occ', '')
         entry_date = contract.get('entryDate', '')
         if occ and entry_date:
