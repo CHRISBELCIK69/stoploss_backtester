@@ -15,11 +15,11 @@ CONFIG = {
     # (Railway: Variables tab; Render: Environment Variables; etc.)
 
     'polygon': {
-        # Local dev: hardcoded key works as the fallback below.
-        # When deployed (Railway/Render), set POLYGON_API_KEY env var which
-        # overrides this. The env var takes precedence so hardcoded value
-        # is only used when env var is missing.
-        'apiKey': os.environ.get('POLYGON_API_KEY', 'M4AWhflTA70bQJaj7p_uR4juaJ_Z6WO0'),
+        # MUST be set via env var — no hardcoded fallback.
+        # Local dev: `export POLYGON_API_KEY=...` before running.
+        # Railway/Render: set POLYGON_API_KEY in the platform's Variables UI.
+        # The previously-committed key has been rotated; do not re-add a fallback.
+        'apiKey': os.environ.get('POLYGON_API_KEY', ''),
     },
 
 

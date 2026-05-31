@@ -1,0 +1,20 @@
+# Railway service config — picked up automatically by Railway on deploy.
+# Procfile already defines the start command (gunicorn). This file adds
+# build/runtime settings on top.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# Use the Procfile's `web:` line as the start command.
+startCommand = "gunicorn main:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2 --threads 4"
+# Restart the container on crash, but cap retries so a broken deploy doesn't loop forever.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Healthcheck — Railway pings this URL after deploy; /api/strategies returns
+# the registered strategy list and exercises the import path end-to-end.
+healthcheckPath = "/api/strategies"
+healthcheckTimeout = 30
+
+# Number of replicas. 1 is plenty for the Hobby plan.
+numReplicas = 1
