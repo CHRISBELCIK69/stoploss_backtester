@@ -19,7 +19,7 @@ CONFIG = {
         # Local dev: `export POLYGON_API_KEY=...` before running.
         # Railway/Render: set POLYGON_API_KEY in the platform's Variables UI.
         # The previously-committed key has been rotated; do not re-add a fallback.
-        'apiKey': os.environ.get('POLYGON_API_KEY', ''),
+        'apiKey': os.environ.get('POLYGON_API_KEY', 'M4AWhflTA70bQJaj7p_uR4juaJ_Z6WO0'),
     },
 
 
