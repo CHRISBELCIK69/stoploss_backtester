@@ -554,6 +554,49 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
   font-size: 10px;
 }
 
+/* ── Selected-strategy pills inside each tile ─────────────────────── */
+/* Populated by updateTileSelected() — reflects whichever strategies   */
+/* are currently on (via global apply or per-contract clicks).         */
+.tile-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 6px;
+  min-height: 0;            /* collapses cleanly when empty */
+}
+.tile-selected:empty { margin: 0; }
+.tile-strat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1.4;
+  background: var(--bg-card, rgba(255,255,255,0.04));
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 999px;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.tile-strat-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tile-strat-name {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+.tile-strat-pnl {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tile-strat-pnl.pos { color: var(--green, #22c55e); }
+.tile-strat-pnl.neg { color: var(--red,   #ef4444); }
+
 /* ── Code-fit zone — only visible when a contract card is expanded ── */
 .code-fit-zone { display: none; }
 .contract-card.expanded .code-fit-zone {

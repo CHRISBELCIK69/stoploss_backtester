@@ -975,6 +975,7 @@ function syncApplyZoneStates() {
     if (e.on === 0)        chip.classList.add('off');
     else if (e.off > 0)    chip.classList.add('mixed');
   });
+  refreshAllTileSelections();
 }
 
 function onApplyChipSearchInput(value) {
@@ -1118,6 +1119,7 @@ function renderContractTile(c, origIdx) {
         <div class="tile-occ">${c.occ}</div>
       </div>
       <div class="tile-best">${bestBlock}</div>
+      <div class="tile-selected" id="tile_selected_${id}"></div>
       <div class="tile-stats">
         <span>${strats.length} strategies</span>
         ${wins   ? `<span class="pos">${wins}W</span>`  : ''}
@@ -1127,6 +1129,54 @@ function renderContractTile(c, origIdx) {
       </div>
     </div>
   `;
+}
+
+// Rebuild the "selected strategies" pill list inside a single tile from
+// chipStore. Called whenever toggles change so each tile shows the P&L
+// for whichever strategies the user has turned on (globally or per-contract).
+function updateTileSelected(contract, origIdx) {
+  const id = `contract_${origIdx}`;
+  const host = document.getElementById(`tile_selected_${id}`);
+  if (!host) return;
+  const bucket = chipStore.state[id];
+  if (!bucket) { host.innerHTML = ''; return; }
+
+  // Index this contract's strategies by id for O(1) P&L lookup
+  const byId = {};
+  (contract.strategies || []).forEach((s, si) => { byId[s.strategyId] = { s, si }; });
+
+  const onSids = Object.keys(bucket).filter(sid => bucket[sid].on);
+  if (!onSids.length) { host.innerHTML = ''; return; }
+
+  // Sort by P&L descending so the most informative pill is first
+  onSids.sort((a, b) => {
+    const pa = byId[a]?.s.pnl ?? -Infinity;
+    const pb = byId[b]?.s.pnl ?? -Infinity;
+    return pb - pa;
+  });
+
+  const pills = onSids.map(sid => {
+    const entry = byId[sid];
+    if (!entry) return '';
+    const { s, si } = entry;
+    const col = COLORS[si % COLORS.length];
+    const cls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : '');
+    return `
+      <span class="tile-strat-pill" title="${s.strategyName} · ${s.exitReason}">
+        <span class="tile-strat-dot" style="background:${col}"></span>
+        <span class="tile-strat-name">${s.strategyName}</span>
+        <span class="tile-strat-pnl ${cls}">${fmtDollars(s.pnl)}</span>
+      </span>`;
+  }).join('');
+
+  host.innerHTML = pills;
+}
+
+// Walk every tile in the grid and refresh its selected-strategies pills.
+// Cheap: one DOM update per contract, no chart redraws.
+function refreshAllTileSelections() {
+  if (!lastContracts) return;
+  lastContracts.forEach((c, i) => updateTileSelected(c, i));
 }
 
 function renderContractGrid(contracts) {
@@ -1146,6 +1196,10 @@ function renderContractGrid(contracts) {
     const origIdx = contracts.indexOf(c);
     return renderContractTile(c, origIdx);
   }).join('');
+
+  // Tiles render with an empty selected-pills block — populate them now
+  // from chipStore so a re-sort or filter doesn't wipe the live selection.
+  refreshAllTileSelections();
 
   if (summary) {
     const winners = contracts.filter(c => {
