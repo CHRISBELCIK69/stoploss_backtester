@@ -47,7 +47,24 @@
   <!-- Global apply zone — toggle a strategy across every contract at once -->
   <div id="applyZone"></div>
 
-  <!-- Results get injected here per contract -->
+  <!-- Grid view — one tile per contract, click to expand into fullscreen modal.
+       The full per-contract cards live in #contractResults below but are
+       hidden in grid mode (CSS) until expanded. -->
+  <div id="gridControls" class="grid-controls hidden">
+    <label for="gridSort">Sort:</label>
+    <select id="gridSort" class="grid-sort-select" onchange="onGridSortChange(this.value)">
+      <option value="symbol_strike" selected>Symbol → strike</option>
+      <option value="best_desc">Best trade ↓ (biggest winners first)</option>
+      <option value="worst_asc">Worst loss ↑ (biggest losers first)</option>
+      <option value="entry_time">Entry time</option>
+      <option value="strategy_count">Strategy count</option>
+    </select>
+    <span id="gridSummary" class="grid-summary"></span>
+  </div>
+  <div id="contractGrid" class="contract-grid"></div>
+
+  <!-- Full per-contract cards (chart + chips + code-fit zone).
+       Rendered into DOM but hidden in grid view unless expanded. -->
   <div id="contractResults"></div>
 
   <!-- Fetch log -->
@@ -77,6 +94,11 @@ function generateColors(n) {
 
 let COLORS = generateColors(64);  // grows on demand
 let chartInstances = [];
+// Tracks which contract cards have had their Chart.js instance built.
+// In grid view we defer buildChart() until the user expands a tile —
+// charts can't measure inside a display:none container so eager build
+// would fail. Resets at the start of every backtest.
+const _chartsBuilt = {};
 
 // ── Color blending for role-based extras ──────────────
 // Parse 'hsl(h, s%, l%)' or '#rrggbb' or 'hsl(...)' → {r, g, b}
@@ -529,6 +551,10 @@ function soloStrategy(contractId, strategyId) {
 function renderChipFamilies(contractId, strategies) {
   // Preserve original index for color stability
   const indexed = strategies.map((r, si) => ({ ...r, _si: si }));
+  // Register every (contract, strategy) pair in the store up front,
+  // so global apply can act on un-built charts (dataset indices are
+  // resolved lazily the first time a chart is touched).
+  indexed.forEach(r => chipStore.register(contractId, r.strategyId));
   // Group by family, preserve first-appearance order
   const groups = {};
   const order  = [];
@@ -760,80 +786,194 @@ function renderApplyZone(contracts) {
   syncApplyZoneStates();
 }
 
-// Click on a global apply-chip — toggles that strategy on every contract.
-// Determined direction: if any contract currently shows it, hide all; else show all.
-function onApplyChipClick(strategyId) {
-  const someOn = isStrategyVisibleSomewhere(strategyId);
-  applyStrategyToAll(strategyId, !someOn);
+// ─── chipStore ───────────────────────────────────────────────
+// Source of truth for which (contract, strategy) chips are visible.
+// Both global apply paths and per-contract handlers write through it,
+// so chart visibility, per-contract chip classes, and the global
+// tri-state never desync. Per-contract handlers that still write
+// chip.off directly are reconciled via the DOM-bridge in
+// syncApplyZoneStates() below.
+const chipStore = {
+  // contractId → strategyId → { on: bool, datasets: number[] | null }
+  // `datasets` is null until the chart has been built and primed.
+  state: Object.create(null),
+
+  reset() { this.state = Object.create(null); },
+
+  register(contractId, strategyId) {
+    let bucket = this.state[contractId];
+    if (!bucket) bucket = this.state[contractId] = Object.create(null);
+    if (!bucket[strategyId]) bucket[strategyId] = { on: false, datasets: null };
+  },
+
+  get(contractId, strategyId) {
+    return this.state[contractId]?.[strategyId];
+  },
+
+  // True if the value actually changed.
+  setOn(contractId, strategyId, on) {
+    const e = this.get(contractId, strategyId);
+    if (!e || e.on === on) return false;
+    e.on = on;
+    return true;
+  },
+
+  contracts()              { return Object.keys(this.state); },
+  strategiesIn(contractId) { const b = this.state[contractId]; return b ? Object.keys(b) : []; },
+
+  isAnyOn(strategyId) {
+    for (const cid in this.state) {
+      const e = this.state[cid][strategyId];
+      if (e && e.on) return true;
+    }
+    return false;
+  },
+
+  countsByStrategy() {
+    const out = Object.create(null);
+    for (const cid in this.state) {
+      const bucket = this.state[cid];
+      for (const sid in bucket) {
+        const e = out[sid] || (out[sid] = { on: 0, off: 0 });
+        if (bucket[sid].on) e.on++; else e.off++;
+      }
+    }
+    return out;
+  },
+
+  // Resolve dataset indices for a contract's strategies from a Chart.js instance.
+  // Called lazily the first time we need to flip visibility for that chart.
+  primeFromChart(contractId, chart) {
+    const bucket = this.state[contractId];
+    if (!bucket || !chart || !chart.data) return;
+    const byId = Object.create(null);
+    chart.data.datasets.forEach((d, i) => {
+      if (!d.strategyId) return;
+      (byId[d.strategyId] || (byId[d.strategyId] = [])).push(i);
+    });
+    for (const sid in bucket) {
+      bucket[sid].datasets = byId[sid] || [];
+    }
+  },
+};
+
+// Build a one-shot { contractId → chart } map.
+function _buildChartByContract() {
+  const out = {};
+  for (const c of chartInstances) {
+    if (c && c.canvas && c.canvas.id.endsWith('_chart')) {
+      out[c.canvas.id.replace(/_chart$/, '')] = c;
+    }
+  }
+  return out;
 }
 
-// Click on a global family label — toggles every chip in that family across all contracts.
+// Flip chart datasets + per-contract chip class for one (contract, strategy).
+// Does NOT touch the store — caller updates the store first via chipStore.setOn.
+// Returns true if at least one dataset was flipped (caller may need chart.update()).
+function _writeVisibility(contractId, strategyId, on, chart) {
+  const chip = document.querySelector(
+    `.strategy-chip:not(.apply-chip)[data-contract="${contractId}"][data-strategy="${strategyId}"]`
+  );
+  if (chip) chip.classList.toggle('off', !on);
+  if (!chart) return false;
+  let entry = chipStore.get(contractId, strategyId);
+  if (entry && entry.datasets === null) chipStore.primeFromChart(contractId, chart);
+  entry = chipStore.get(contractId, strategyId);
+  if (!entry || !entry.datasets || !entry.datasets.length) return false;
+  for (const idx of entry.datasets) chart.setDatasetVisibility(idx, on);
+  return true;
+}
+
+// ─── Contract-by-contract apply ──────────────────────────────
+// Iterates contracts one at a time, yielding to the browser between
+// each so the UI repaints. With 100s of contracts × dozens of strategies
+// this keeps the page responsive instead of locking up in a single tick.
+// Concurrent global-apply clicks are coalesced — the second waits for the
+// first to finish before starting, avoiding interleaved state thrash.
+let _globalApplyInFlight = null;
+async function applyToAllContractsAsync(sidFilter, visible) {
+  if (_globalApplyInFlight) {
+    try { await _globalApplyInFlight; } catch { /* swallow — next run continues */ }
+  }
+  const run = (async () => {
+    const chartByContract = _buildChartByContract();
+    const cids = chipStore.contracts();
+    for (let i = 0; i < cids.length; i++) {
+      const cid   = cids[i];
+      const chart = chartByContract[cid];
+      let dirty   = false;
+      for (const sid of chipStore.strategiesIn(cid)) {
+        if (!sidFilter(sid)) continue;
+        if (!chipStore.setOn(cid, sid, visible)) continue;
+        _writeVisibility(cid, sid, visible, chart);
+        dirty = true;
+      }
+      if (dirty && chart) chart.update();
+      if (i + 1 < cids.length) {
+        // Yield once per contract so the browser can paint.
+        await new Promise(r => requestAnimationFrame(r));
+      }
+    }
+    syncApplyZoneStates();
+  })();
+  _globalApplyInFlight = run;
+  try { await run; }
+  finally {
+    if (_globalApplyInFlight === run) _globalApplyInFlight = null;
+  }
+}
+
+// Single global apply-chip click.
+function onApplyChipClick(strategyId) {
+  const someOn = chipStore.isAnyOn(strategyId);
+  applyToAllContractsAsync(sid => sid === strategyId, !someOn);
+}
+
+// Family label click — toggle every chip in that family across every contract.
 function onApplyFamilyClick(family) {
-  const chips = document.querySelectorAll(`.apply-chip[data-family="${family}"]`);
-  // If any chip in the family is "all on", we hide all; otherwise show all.
+  const sids = new Set();
+  document.querySelectorAll(`.apply-chip[data-family="${family}"]`)
+    .forEach(c => sids.add(c.getAttribute('data-strategy')));
+  if (sids.size === 0) return;
   let anyOn = false;
-  chips.forEach(chip => {
-    const sid = chip.getAttribute('data-strategy');
-    if (isStrategyVisibleSomewhere(sid)) anyOn = true;
-  });
-  chips.forEach(chip => {
-    const sid = chip.getAttribute('data-strategy');
-    applyStrategyToAll(sid, !anyOn);
-  });
+  for (const sid of sids) {
+    if (chipStore.isAnyOn(sid)) { anyOn = true; break; }
+  }
+  applyToAllContractsAsync(sid => sids.has(sid), !anyOn);
 }
 
 function isStrategyVisibleSomewhere(strategyId) {
-  const chips = document.querySelectorAll(
-    `.strategy-chip:not(.apply-chip)[data-strategy="${strategyId}"]`
-  );
-  for (const c of chips) if (!c.classList.contains('off')) return true;
-  return false;
+  return chipStore.isAnyOn(strategyId);
 }
 
+// Public hooks kept so inline-onclick callers don't break.
 function applyStrategyToAll(strategyId, visible) {
-  // Iterate every per-contract chip with this strategyId and flip its chart line
-  const chips = document.querySelectorAll(
-    `.strategy-chip:not(.apply-chip)[data-strategy="${strategyId}"]`
-  );
-  const touchedCharts = new Set();
-  chips.forEach(chip => {
-    const cid = chip.getAttribute('data-contract');
-    const chart = findChartForContract(cid);
-    if (!chart) return;
-    findStrategyDatasets(chart, strategyId).forEach(idx => {
-      chart.setDatasetVisibility(idx, visible);
-    });
-    chip.classList.toggle('off', !visible);
-    touchedCharts.add(chart);
-  });
-  touchedCharts.forEach(ch => ch.update());
-  syncApplyZoneStates();
+  return applyToAllContractsAsync(sid => sid === strategyId, visible);
 }
-
 function applyAllContractsAll(visible) {
-  // Every strategy on every contract
-  const ids = new Set();
-  document.querySelectorAll('.strategy-chip:not(.apply-chip)').forEach(c => {
-    ids.add(c.getAttribute('data-strategy'));
-  });
-  ids.forEach(sid => applyStrategyToAll(sid, visible));
+  return applyToAllContractsAsync(() => true, visible);
 }
 
-// Recompute each global chip's three-state class from per-contract chip state.
+// Recompute every global apply-chip's tri-state class from the store.
+// Per-contract chip handlers still write chip.off directly, so we
+// reconcile DOM → store here first (cheap single pass) before reading
+// counts back out. That keeps the store consistent without having to
+// rewrite every per-contract toggle path.
 function syncApplyZoneStates() {
+  document.querySelectorAll('.strategy-chip:not(.apply-chip)').forEach(c => {
+    const cid = c.getAttribute('data-contract');
+    const sid = c.getAttribute('data-strategy');
+    const e   = chipStore.get(cid, sid);
+    if (e) e.on = !c.classList.contains('off');
+  });
+  const counts = chipStore.countsByStrategy();
   document.querySelectorAll('.apply-chip').forEach(chip => {
     const sid = chip.getAttribute('data-strategy');
-    const perContract = document.querySelectorAll(
-      `.strategy-chip:not(.apply-chip)[data-strategy="${sid}"]`
-    );
-    let onCount = 0, offCount = 0;
-    perContract.forEach(c => {
-      if (c.classList.contains('off')) offCount++;
-      else onCount++;
-    });
+    const e   = counts[sid] || { on: 0, off: 0 };
     chip.classList.remove('off', 'mixed');
-    if (onCount === 0)          chip.classList.add('off');
-    else if (offCount > 0)      chip.classList.add('mixed');
+    if (e.on === 0)        chip.classList.add('off');
+    else if (e.off > 0)    chip.classList.add('mixed');
   });
 }
 
@@ -856,6 +996,170 @@ function applyApplyZoneSearchVisibility() {
     fam.style.display = any ? '' : 'none';
   });
 }
+
+// ── Grid view — one tile per contract ─────────────────
+// Tiles show contract identity + the most profitable strategy on that
+// contract. Clicking a tile opens the fullscreen expand modal (same as
+// the existing ⤢ Expand button). Inline contract cards stay in DOM but
+// are hidden via CSS while body.grid-view is on; the .expanded class
+// brings the relevant one back on top via position:fixed.
+let _currentSortMode = 'symbol_strike';
+
+function parseOccBasic(occ) {
+  // OCC: <SYMBOL><YYMMDD><C/P><8-digit strike × 1000>
+  if (!occ || occ.length < 16) {
+    return { symbol: occ || '', strike: 0, type: 'C', expiry: '' };
+  }
+  const symbol = occ.slice(0, -15);
+  const dateP  = occ.slice(-15, -9);
+  const type   = occ.slice(-9, -8);
+  const strike = parseInt(occ.slice(-8), 10) / 1000;
+  const expiry = `20${dateP.slice(0,2)}-${dateP.slice(2,4)}-${dateP.slice(4,6)}`;
+  return { symbol, strike, type, expiry };
+}
+
+function bestStrategy(c) {
+  const strats = c.strategies || [];
+  if (!strats.length) return null;
+  return strats.reduce(
+    (best, s) => (best === null || s.pnl > best.pnl) ? s : best,
+    null,
+  );
+}
+
+function worstStrategy(c) {
+  const strats = c.strategies || [];
+  if (!strats.length) return null;
+  return strats.reduce(
+    (worst, s) => (worst === null || s.pnl < worst.pnl) ? s : worst,
+    null,
+  );
+}
+
+function sortContracts(contracts, mode) {
+  const out = [...contracts];
+  switch (mode) {
+    case 'best_desc':
+      out.sort((a, b) => {
+        const pa = bestStrategy(a)?.pnl; const pb = bestStrategy(b)?.pnl;
+        return (pb ?? -Infinity) - (pa ?? -Infinity);
+      });
+      break;
+    case 'worst_asc':
+      out.sort((a, b) => {
+        const pa = worstStrategy(a)?.pnl; const pb = worstStrategy(b)?.pnl;
+        return (pa ?? Infinity) - (pb ?? Infinity);
+      });
+      break;
+    case 'entry_time':
+      out.sort((a, b) =>
+        `${a.entryDate} ${a.entryTime}`.localeCompare(`${b.entryDate} ${b.entryTime}`)
+      );
+      break;
+    case 'strategy_count':
+      out.sort((a, b) => (b.strategies?.length || 0) - (a.strategies?.length || 0));
+      break;
+    case 'symbol_strike':
+    default:
+      out.sort((a, b) => {
+        const pa = parseOccBasic(a.occ); const pb = parseOccBasic(b.occ);
+        if (pa.symbol !== pb.symbol) return pa.symbol.localeCompare(pb.symbol);
+        if (pa.strike !== pb.strike) return pa.strike - pb.strike;
+        return pa.expiry.localeCompare(pb.expiry);
+      });
+  }
+  return out;
+}
+
+function renderContractTile(c, origIdx) {
+  const id     = `contract_${origIdx}`;
+  const p      = parseOccBasic(c.occ);
+  const best   = bestStrategy(c);
+  const strats = c.strategies || [];
+  const wins   = strats.filter(s => s.pnl > 0).length;
+  const losses = strats.filter(s => s.pnl < 0).length;
+  const eod    = strats.filter(s => s.exitReason === 'eod').length;
+  const typeBadge = p.type === 'C' ? 'CALL' : 'PUT';
+
+  const bestCls = best
+    ? (best.pnl > 0 ? 'pos' : (best.pnl < 0 ? 'neg' : ''))
+    : '';
+  const stripeCls = best
+    ? (best.pnl > 0 ? 'tile-stripe-win' : 'tile-stripe-loss')
+    : '';
+
+  const bestBlock = best
+    ? `
+      <div class="tile-best-label">Best strategy</div>
+      <div class="tile-best-name" title="${best.strategyName}">${best.strategyName}</div>
+      <div class="tile-best-stats">
+        <span class="tile-pnl ${bestCls}">${fmtDollars(best.pnl)}</span>
+        <span class="tile-ret ${bestCls}">${(best.retPct >= 0 ? '+' : '') + best.retPct.toFixed(1)}%</span>
+        ${badgeFor(best.exitReason)}
+      </div>
+      <div class="tile-best-fills">
+        Entry $${best.entryPrice.toFixed(2)} → Exit $${best.exitPrice.toFixed(2)}
+      </div>`
+    : `<div class="tile-best-empty">No strategy results for this contract</div>`;
+
+  return `
+    <div class="contract-tile ${stripeCls}"
+         data-contract-id="${id}"
+         onclick="expandContract('${id}')"
+         onkeydown="if(event.key==='Enter'){expandContract('${id}')}"
+         role="button" tabindex="0">
+      <div class="tile-head">
+        <div class="tile-sym">
+          <span>${p.symbol}</span>
+          <span class="tile-strike">$${p.strike}</span>
+          <span class="tile-type ${p.type === 'C' ? 'tile-type-c' : 'tile-type-p'}">${typeBadge}</span>
+        </div>
+        <div class="tile-entry">Entry ${c.entryDate} ${c.entryTime} CST · Expiry ${p.expiry}</div>
+        <div class="tile-occ">${c.occ}</div>
+      </div>
+      <div class="tile-best">${bestBlock}</div>
+      <div class="tile-stats">
+        <span>${strats.length} strategies</span>
+        ${wins   ? `<span class="pos">${wins}W</span>`  : ''}
+        ${losses ? `<span class="neg">${losses}L</span>` : ''}
+        ${eod    ? `<span class="muted">${eod} EOD</span>` : ''}
+        <span class="tile-expand-hint">click to expand →</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderContractGrid(contracts) {
+  const grid     = document.getElementById('contractGrid');
+  const controls = document.getElementById('gridControls');
+  const summary  = document.getElementById('gridSummary');
+  if (!grid) return;
+  if (!contracts || !contracts.length) {
+    grid.innerHTML = '';
+    if (controls) controls.classList.add('hidden');
+    return;
+  }
+  if (controls) controls.classList.remove('hidden');
+
+  const sorted = sortContracts(contracts, _currentSortMode);
+  grid.innerHTML = sorted.map(c => {
+    const origIdx = contracts.indexOf(c);
+    return renderContractTile(c, origIdx);
+  }).join('');
+
+  if (summary) {
+    const winners = contracts.filter(c => {
+      const b = bestStrategy(c); return b && b.pnl > 0;
+    }).length;
+    summary.textContent = `${contracts.length} contracts · ${winners} with a profitable strategy`;
+  }
+}
+
+function onGridSortChange(mode) {
+  _currentSortMode = mode;
+  if (lastContracts) renderContractGrid(lastContracts);
+}
+
 
 // ── Expand-to-fullscreen modal for a contract ─────────
 // CSS-only approach: toggle .expanded on the contract card. Chart.js
@@ -1090,8 +1394,22 @@ function expandContract(contractId) {
   }
   if (sid) loadStrategySource(contractId, sid);
 
-  // Resize chart to fill new container after CSS layout settles
+  // Lazy chart build + resize after CSS layout has settled.
+  // Cards live inside #contractResults (display:none in grid view), so
+  // Chart.js couldn't measure the canvas during the initial render
+  // loop. We defer the build until the card is on-screen via .expanded.
   requestAnimationFrame(() => {
+    if (!_chartsBuilt[contractId]) {
+      const m = contractId.match(/^contract_(\d+)$/);
+      if (m && lastContracts) {
+        const idx = parseInt(m[1], 10);
+        const c = lastContracts[idx];
+        if (c) {
+          buildChart(c, idx);
+          _chartsBuilt[contractId] = true;
+        }
+      }
+    }
     const chart = findChartForContract(contractId);
     if (chart) chart.resize();
   });
@@ -1684,17 +2002,29 @@ function buildChart(c, idx) {
     },
   });
 
-  // Hide every strategy stop line (primary + extras) by default —
-  // user clicks chips to reveal. Detection is now by strategyId tag
-  // (not by label), so it covers extras too.
+  chartInstances.push(chart);
+
+  // Initial dataset visibility comes from chipStore — defaults are "off",
+  // but if a user clicked a global apply chip while this card was still
+  // collapsed (chart not yet built), the store will already say "on" for
+  // those (contract, strategy) pairs and we honor it on build.
+  const contractId = chart.canvas.id.replace(/_chart$/, '');
+  chipStore.primeFromChart(contractId, chart);
   chart.data.datasets.forEach((ds, idx) => {
-    if (ds.strategyId !== undefined) {
-      chart.setDatasetVisibility(idx, false);
-    }
+    if (ds.strategyId === undefined) return;
+    const e = chipStore.get(contractId, ds.strategyId);
+    chart.setDatasetVisibility(idx, !!(e && e.on));
+  });
+  // Bring per-contract chip classes back in line with the store too,
+  // in case global apply ran before this card was expanded.
+  chipStore.strategiesIn(contractId).forEach(sid => {
+    const e = chipStore.get(contractId, sid);
+    const chip = document.querySelector(
+      `.strategy-chip:not(.apply-chip)[data-contract="${contractId}"][data-strategy="${sid}"]`
+    );
+    if (chip) chip.classList.toggle('off', !(e && e.on));
   });
   chart.update();
-
-  chartInstances.push(chart);
 }
 
 
@@ -1960,12 +2290,17 @@ async function runBacktest() {
   document.getElementById('aggregateResults').innerHTML = '';
   document.getElementById('timingResults').innerHTML    = '';
   document.getElementById('applyZone').innerHTML        = '';
+  document.getElementById('contractGrid').innerHTML     = '';
+  document.getElementById('gridControls').classList.add('hidden');
   document.getElementById('logCard').classList.add('hidden');
   if (_expandedContractId) collapseContract();
+  // Reset lazy-chart-build tracking so the next run rebuilds on first expand
+  for (const k in _chartsBuilt) delete _chartsBuilt[k];
 
   // Destroy old charts
   chartInstances.forEach(c => c.destroy());
   chartInstances = [];
+  chipStore.reset();
 
   const raw = document.getElementById('contractInput').value.trim();
   if (!raw) { showError('Paste at least one contract.'); return; }
@@ -2023,19 +2358,18 @@ async function runBacktest() {
     lastContracts = contracts;
     renderAggregateStats(contracts);
 
-    // Render each contract block
+    // Render each contract block into #contractResults — these stay
+    // hidden in grid view (CSS), and only become visible when expanded.
+    // Chart.js instances are built lazily on first expandContract() so
+    // that we don't try to measure canvases inside display:none parents.
     const container = document.getElementById('contractResults');
     contracts.forEach((c, i) => {
       container.innerHTML += renderContractBlock(c, i);
     });
 
-    // Build charts after DOM is ready
-    contracts.forEach((c, i) => {
-      buildChart(c, i);
-    });
-
-    // Restore per-contract chip search values (from this session's
-    // localStorage) and render the global apply zone
+    // Restore per-contract chip search values from this session's localStorage.
+    // Chips live inside hidden cards in grid view but localStorage state
+    // is restored eagerly so it's correct the moment a card is expanded.
     contracts.forEach((_, i) => {
       const id = `contract_${i}`;
       const saved = localStorage.getItem('backtester_chip_search_' + id) || '';
@@ -2048,6 +2382,10 @@ async function runBacktest() {
       }
     });
     renderApplyZone(contracts);
+
+    // Switch the page into grid view + render the tile grid
+    document.body.classList.add('grid-view');
+    renderContractGrid(contracts);
 
   } catch (e) {
     showError('Request failed: ' + e.message);

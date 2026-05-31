@@ -386,6 +386,174 @@ body.expanded-open {
   display: none;
 }
 
+/* ── Grid view — replaces the long scrollable contract-cards layout ──
+   Tiles show contract identity + best strategy. Click a tile to open the
+   existing fullscreen expand modal. Cards live in #contractResults but
+   are hidden by display:none in grid mode (except .expanded ones). */
+body.grid-view #contractResults > .contract-card { display: none; }
+body.grid-view #contractResults > .contract-card.expanded { display: block; }
+
+.grid-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 8px;
+  flex-wrap: wrap;
+}
+.grid-controls.hidden { display: none; }
+.grid-controls label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.grid-sort-select {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+}
+.grid-sort-select:focus { border-color: var(--accent); }
+.grid-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.contract-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.contract-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.contract-tile:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.contract-tile.tile-stripe-win  { border-left-color: var(--green, #22c55e); }
+.contract-tile.tile-stripe-loss { border-left-color: var(--red,   #ef4444); }
+
+.tile-head { display: flex; flex-direction: column; gap: 3px; }
+.tile-sym {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tile-strike {
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+}
+.tile-type {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.6px;
+}
+.tile-type-c { background: rgba(34, 197, 94, 0.18); color: #22c55e; }
+.tile-type-p { background: rgba(239, 68, 68, 0.18); color: #ef4444; }
+.tile-entry {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.tile-occ {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.tile-best {
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tile-best-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.tile-best-name {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tile-best-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.tile-pnl {
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  font-size: 15px;
+}
+.tile-ret {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.tile-best-fills {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+.tile-best-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.tile-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+.tile-stats .pos   { color: var(--green, #22c55e); font-weight: 600; }
+.tile-stats .neg   { color: var(--red,   #ef4444); font-weight: 600; }
+.tile-stats .muted { color: var(--text-muted); }
+.tile-expand-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
 /* ── Code-fit zone — only visible when a contract card is expanded ── */
 .code-fit-zone { display: none; }
 .contract-card.expanded .code-fit-zone {
