@@ -521,10 +521,15 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
   font-family: var(--font-mono, monospace);
   font-weight: 700;
   font-size: 15px;
+  font-variant-numeric: tabular-nums;
 }
 .tile-ret {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tile-best-fills {
+  font-variant-numeric: tabular-nums;
 }
 .tile-best-fills {
   font-size: 10px;
@@ -610,6 +615,7 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
   font-size: 10px;
   color: var(--text-muted);
   font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
 }
 /* Rank pill: lives on the right of the "Selected" label row. */
 .tile-strat-block-label {
@@ -638,6 +644,7 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
 .tile-strat-block-ctx {
   font-size: 10px;
   font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   margin-top: 1px;
 }

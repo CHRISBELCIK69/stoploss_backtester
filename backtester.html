@@ -328,11 +328,11 @@ async function runBracketLab(contractId) {
     result.innerHTML = `
       <span class="lab-result-row">
         <span><strong>TP ${tp}%</strong> / <strong>SL ${sl}%</strong> &nbsp;<span class="lab-rr">R:R ${rr}</span></span>
-        <span>Entry $${r.entryPrice.toFixed(2)} → Exit $${r.exitPrice.toFixed(2)}</span>
+        <span>Entry ${fmtPrice(r.entryPrice)} → Exit ${fmtPrice(r.exitPrice)}</span>
         <span class="${cls}" style="font-weight:600;font-family:var(--font-mono)">${fmtDollars(r.pnl)}</span>
         <span class="${cls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</span>
         <span>${badgeFor(r.exitReason)}</span>
-        <span style="color:var(--text-muted);font-size:11px">${fmtTs(r.exitTs)}</span>
+        <span style="color:var(--text-muted);font-size:11px">${fmtTsShort(r.exitTs)}</span>
       </span>`;
 
     overlayLabResultOnChart(contractId, r, tp, sl);
@@ -1099,7 +1099,7 @@ function renderContractTile(c, origIdx) {
         ${badgeFor(best.exitReason)}
       </div>
       <div class="tile-best-fills">
-        Entry $${best.entryPrice.toFixed(2)} → Exit $${best.exitPrice.toFixed(2)}
+        Entry ${fmtPrice(best.entryPrice)} → Exit ${fmtPrice(best.exitPrice)}
       </div>`
     : `<div class="tile-best-empty">No strategy results for this contract</div>`;
 
@@ -1131,9 +1131,14 @@ function renderContractTile(c, origIdx) {
   `;
 }
 
-// Format a millisecond duration as "X min" / "Xh Ym" / "Xd Yh".
+// Format a millisecond duration. Handles sub-minute (shows seconds),
+// "X min", "Xh Ym", "Xd Yh".
 function fmtHoldDuration(ms) {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 60000) {
+    const sec = Math.max(1, Math.round(ms / 1000));
+    return `${sec} sec`;
+  }
   const totalMin = Math.round(ms / 60000);
   if (totalMin < 60)  return `${totalMin} min`;
   const h = Math.floor(totalMin / 60);
@@ -1144,13 +1149,16 @@ function fmtHoldDuration(ms) {
   return rh ? `${d}d ${rh}h` : `${d}d`;
 }
 
-// Extract HH:MM from a "YYYY-MM-DD HH:MM:SS" or ISO timestamp.
-function fmtTimeOfDay(ts) {
+// Extract HH:MM from a "YYYY-MM-DD HH:MM:SS" or ISO timestamp and
+// suffix the timezone label so callers don't have to.
+function fmtTimeOfDay(ts, tz = 'CST') {
   if (!ts || typeof ts !== 'string') return '';
-  // Look for the first " " or "T" separator, then take 5 chars.
   const sep = Math.max(ts.indexOf(' '), ts.indexOf('T'));
-  if (sep < 0) return ts.length >= 5 ? ts.slice(0, 5) : '';
-  return ts.slice(sep + 1, sep + 6);
+  const hhmm = sep < 0
+    ? (ts.length >= 5 ? ts.slice(0, 5) : '')
+    : ts.slice(sep + 1, sep + 6);
+  if (!hhmm) return '';
+  return tz ? `${hhmm} ${tz}` : hhmm;
 }
 
 // Per-contract rank cache so we don't re-sort N strategies for every
@@ -1206,7 +1214,7 @@ function updateTileSelected(contract, origIdx) {
     const cls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : '');
     const ret = (s.retPct >= 0 ? '+' : '') + s.retPct.toFixed(1) + '%';
     const fills = (s.entryPrice != null && s.exitPrice != null)
-      ? `Entry $${s.entryPrice.toFixed(2)} → Exit $${s.exitPrice.toFixed(2)}`
+      ? `Entry ${fmtPrice(s.entryPrice)} → Exit ${fmtPrice(s.exitPrice)}`
       : '';
 
     // Tier 1 context line
@@ -1221,7 +1229,7 @@ function updateTileSelected(contract, origIdx) {
       const diff = s.pnl - bestPnl;   // negative when this is worse than best
       const dcls = diff >= 0 ? 'pos' : 'neg';
       const sign = diff >= 0 ? '+' : '−';
-      deltaStr = `<span class="tile-strat-block-delta ${dcls}">(${sign}${fmtDollars(Math.abs(diff)).replace(/^[-+]/, '')} vs best)</span>`;
+      deltaStr = `<span class="tile-strat-block-delta ${dcls}">(${sign}${fmtMoneyAbs(diff)} vs best)</span>`;
     }
 
     // Hold time + bars + exit time-of-day
@@ -1234,8 +1242,8 @@ function updateTileSelected(contract, origIdx) {
     const barsStr = (s.barsHeld != null && s.totalBars != null)
       ? `${s.barsHeld} / ${s.totalBars} bars`
       : '';
-    const exitTod = fmtTimeOfDay(s.exitTs);
-    const exitStr = exitTod ? `Exit ${exitTod} CST` : '';
+    const exitTod = fmtTimeOfDay(s.exitTs);   // already includes "CST"
+    const exitStr = exitTod ? `Exit ${exitTod}` : '';
     const ctxParts = [
       holdStr ? `Held ${holdStr}` : '',
       barsStr,
@@ -1441,11 +1449,11 @@ async function runCustomStrategy(contractId) {
     const r = data.result;
     const cls = r.pnl >= 0 ? 'pos' : 'neg';
     out.innerHTML = `
-      Entry $${r.entryPrice.toFixed(2)} → Exit $${r.exitPrice.toFixed(2)} &nbsp;
+      Entry ${fmtPrice(r.entryPrice)} → Exit ${fmtPrice(r.exitPrice)} &nbsp;
       <span class="${cls}" style="font-weight:600;font-family:var(--font-mono)">${fmtDollars(r.pnl)}</span>
       <span class="${cls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</span>
       ${badgeFor(r.exitReason)}
-      <span style="color:var(--text-muted);font-size:11px">${fmtTs(r.exitTs)}</span>`;
+      <span style="color:var(--text-muted);font-size:11px">${fmtTsShort(r.exitTs)}</span>`;
     overlayCustomResultOnChart(contractId, r);
   } catch (e) {
     out.innerHTML = `<span class="neg">Request failed: ${e.message}</span>`;
@@ -1587,8 +1595,50 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _expandedContractId) collapseContract();
 });
 
-function fmtDollars(v) { return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2); }
-function fmtTs(ts) { return ts.replace('T', ' ').slice(0, 16); }
+// ── Money / price / time formatters ──────────────────────────────
+// Thousands-separated, U+2212 minus (visually distinct from a hyphen),
+// fixed 2 decimals. Centralized so every tile, table, and tooltip reads
+// the same.
+
+// Signed P&L: "+$1,234.56" / "−$22.00".  Use for deltas, P&L, anything
+// where sign carries meaning.
+function fmtDollars(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  // Normalize negative-zero: -0.001 rounds to -0.00 and reads wrong.
+  if (Object.is(Math.round(v * 100) / 100, -0)) v = 0;
+  const sign = v < 0 ? '−' : '+';
+  return sign + '$' + Math.abs(v).toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+// Unsigned magnitude: "$22.00" / "$1,234.56". Use for "absolute"
+// readouts like "(−$22 vs best)" where the caller supplies the sign.
+function fmtMoneyAbs(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return '$' + Math.abs(v).toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+// Price: "$4.66" / "$1,234.56". Same as fmtMoneyAbs but reads clearer
+// as a function name at call sites that show entry/exit fills.
+const fmtPrice = fmtMoneyAbs;
+
+// Full timestamp: "2026-05-20 13:33". Used in tables / expanded cards.
+function fmtTs(ts) {
+  if (!ts || typeof ts !== 'string') return '';
+  return ts.replace('T', ' ').slice(0, 16);
+}
+
+// Short timestamp for compact rows: drop the year, drop the seconds,
+// give back "5/20 13:33". Falls back to fmtTs if parse fails.
+function fmtTsShort(ts) {
+  if (!ts || typeof ts !== 'string') return '';
+  const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return fmtTs(ts);
+  return `${parseInt(m[2])}/${parseInt(m[3])} ${m[4]}:${m[5]}`;
+}
 function showError(msg) {
   const el = document.getElementById('parseErr');
   el.textContent = msg; el.style.display = msg ? '' : 'none';
@@ -1627,8 +1677,8 @@ function renderContractBlock(c, idx) {
         <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${COLORS[si % COLORS.length]};margin-right:6px;vertical-align:middle"></span>
         <strong>${r.strategyName}</strong>
       </td>
-      <td>$${r.entryPrice.toFixed(2)}</td>
-      <td>$${r.exitPrice.toFixed(2)}</td>
+      <td>${fmtPrice(r.entryPrice)}</td>
+      <td>${fmtPrice(r.exitPrice)}</td>
       <td class="${pnlCls}" style="font-family:var(--font-mono);font-weight:600">${fmtDollars(r.pnl)}</td>
       <td class="${pnlCls}">${(r.retPct >= 0 ? '+' : '') + r.retPct.toFixed(1)}%</td>
       <td>${fmtTs(r.exitTs)}</td>
@@ -1932,7 +1982,7 @@ function buildChart(c, idx) {
         if (!point) return;
 
         const color = COLORS[si % COLORS.length];
-        const label = `${strat.strategyName.replace(/Trailing /, 'T')} $${strat.exitPrice.toFixed(2)}`;
+        const label = `${strat.strategyName.replace(/Trailing /, 'T')} ${fmtPrice(strat.exitPrice)}`;
 
         // Offset early exits upward, late exits to the right of the marker
         const isEarly = exitIdx < bars.length * 0.25;
