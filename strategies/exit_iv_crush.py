@@ -129,16 +129,26 @@ def execute(bars, entry_idx, entry_price, params):
 
         trace.append({'time': bar['time'], 'stopPrice': hard_stop})
         append_trace(extras, 'Hard stop', bar, hard_stop)
-        if crush_floor:
-            append_trace(extras, 'IV crush floor', bar, crush_floor)
+        # NOTE: previously this also did
+        #   append_trace(extras, 'IV crush floor', bar, crush_floor)
+        # which put an IV decimal (~0.31) onto the *option-price* chart
+        # at $0.31 — visually meaningless. The threshold belongs on the
+        # IV panel below, where it can actually be compared to current_iv.
         # Diagnostic series — IV scaled ×100 so it lives on the same y-axis
-        # as proxy-VIX (~15–50). entry_iv reference line is constant.
+        # as proxy-VIX (~15–50). entry_iv + crush_floor (+ spike_ceil if on)
+        # are flat reference lines you can watch current_iv cross.
         if current_iv is not None:
             append_diag(diag, 'current_iv', bar, round(current_iv * 100, 2),
                         label='Current IV', unit='%', scaleHint='volatility')
         if entry_iv is not None:
             append_diag(diag, 'entry_iv', bar, round(entry_iv * 100, 2),
                         label='Entry IV', unit='%', scaleHint='volatility')
+        if crush_floor is not None:
+            append_diag(diag, 'crush_floor', bar, round(crush_floor * 100, 2),
+                        label='Crush floor (exit ↓)', unit='%', scaleHint='volatility')
+        if spike_ceil is not None:
+            append_diag(diag, 'spike_ceil', bar, round(spike_ceil * 100, 2),
+                        label='Spike ceiling (exit ↑)', unit='%', scaleHint='volatility')
 
         if bar_open <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': bar_open,

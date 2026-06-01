@@ -192,7 +192,13 @@ def execute(bars, entry_idx, entry_price, params):
 
         trace.append({'time': bar['time'], 'stopPrice': hard_stop})
         append_trace(extras, 'Hard stop', bar, hard_stop)
-        # Diagnostic: per-bar proxy-VIX value, plus the trigger reference line.
+        # NOTE: previously also did
+        #   append_trace(extras, f'VIX level ({vix_level})', bar, hard_stop)
+        # which drew the hard-stop value twice with a misleading "VIX level"
+        # label on the option-price chart. The actual VIX trigger now lives
+        # on the volatility diagnostic panel below, where it can be compared
+        # to proxy_vix at the same scale.
+        # Diagnostic: per-bar proxy-VIX value + the trigger as a flat ref line.
         append_diag(diag, 'proxy_vix', bar, round(proxy_vix, 2) if proxy_vix else None,
                     label='Proxy VIX', unit='', scaleHint='volatility')
         append_diag(diag, 'vix_trigger', bar, vix_level,
