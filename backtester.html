@@ -1848,6 +1848,31 @@ function buildChart(c, idx) {
   const tsIdx = {};
   bars.forEach((b, i) => { tsIdx[b.time] = i; });
 
+  // Default viewport: entry−10 bars to last-exit+20 bars (or end of data).
+  // Polygon often returns the full prior session(s) for context — strategies
+  // need that for ATR/MA seeding — but the user almost always wants the
+  // chart focused on the trade itself, not the previous days. The zoom
+  // plugin still allows panning/wheel-zoom out to the full range.
+  const PRE_ENTRY_BARS = 10;
+  const POST_EXIT_BARS = 20;
+  let viewMinMs = null, viewMaxMs = null;
+  if (strategies.length && barMs.length) {
+    const entryIdx = tsIdx[strategies[0].entryTs];
+    if (entryIdx !== undefined) {
+      const startIdx = Math.max(0, entryIdx - PRE_ENTRY_BARS);
+      viewMinMs = barMs[startIdx];
+
+      // Latest exit across all strategies (so every stop trace stays on-screen)
+      let lastExitIdx = entryIdx;
+      strategies.forEach(s => {
+        const ei = tsIdx[s.exitTs];
+        if (ei !== undefined && ei > lastExitIdx) lastExitIdx = ei;
+      });
+      const endIdx = Math.min(barMs.length - 1, lastExitIdx + POST_EXIT_BARS);
+      viewMaxMs = barMs[endIdx];
+    }
+  }
+
   const datasets = [];
 
   // Price high/low range as a filled band
@@ -2223,6 +2248,12 @@ function buildChart(c, idx) {
           // bars, so spacing is correct without "skipping" 10:02–10:04
           // when a quiet contract has no prints there.
           type: 'time',
+          // Initial viewport — set to trade window so the user lands on
+          // entry−10 bars to exit+20 bars instead of seeing days of prior
+          // session data. Pan/zoom out (shift-drag, wheel) still reaches
+          // the full bar range.
+          min: viewMinMs,
+          max: viewMaxMs,
           time: {
             unit: 'minute',
             tooltipFormat: 'MMM d, HH:mm',
