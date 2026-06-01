@@ -554,48 +554,63 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
   font-size: 10px;
 }
 
-/* ── Selected-strategy pills inside each tile ─────────────────────── */
-/* Populated by updateTileSelected() — reflects whichever strategies   */
-/* are currently on (via global apply or per-contract clicks).         */
+/* ── Selected-strategy detail blocks inside each tile ─────────────── */
+/* Populated by updateTileSelected() — mirrors the Best Strategy block */
+/* layout so each selected strategy reads as a full snapshot.          */
 .tile-selected {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  flex-direction: column;
+  gap: 6px;
   margin: 8px 0 6px;
-  min-height: 0;            /* collapses cleanly when empty */
 }
-.tile-selected:empty { margin: 0; }
-.tile-strat-pill {
-  display: inline-flex;
+.tile-selected:empty { margin: 0; gap: 0; }
+
+.tile-strat-block {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--strat-color, var(--border));
+  border-radius: 4px;
+  background: var(--bg-card, rgba(255,255,255,0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tile-strat-block-label {
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 7px;
-  font-size: 10px;
-  line-height: 1.4;
-  background: var(--bg-card, rgba(255,255,255,0.04));
-  border: 1px solid var(--border, rgba(255,255,255,0.08));
-  border-radius: 999px;
-  white-space: nowrap;
-  max-width: 100%;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  font-weight: 600;
 }
-.tile-strat-dot {
-  width: 6px;
-  height: 6px;
+.tile-strat-block-dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.tile-strat-name {
-  color: var(--text-secondary);
+.tile-strat-block-name {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  white-space: nowrap;
 }
-.tile-strat-pnl {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+.tile-strat-block-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
 }
-.tile-strat-pnl.pos { color: var(--green, #22c55e); }
-.tile-strat-pnl.neg { color: var(--red,   #ef4444); }
+.tile-strat-block-fills {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
 
 /* ── Code-fit zone — only visible when a contract card is expanded ── */
 .code-fit-zone { display: none; }

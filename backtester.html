@@ -1131,9 +1131,10 @@ function renderContractTile(c, origIdx) {
   `;
 }
 
-// Rebuild the "selected strategies" pill list inside a single tile from
-// chipStore. Called whenever toggles change so each tile shows the P&L
-// for whichever strategies the user has turned on (globally or per-contract).
+// Rebuild the "selected strategies" detail blocks inside a single tile
+// from chipStore. Each block mirrors the Best Strategy layout — name,
+// P&L, return %, exit-reason badge, and entry → exit fills — so the
+// user gets the full snapshot for every strategy they've turned on.
 function updateTileSelected(contract, origIdx) {
   const id = `contract_${origIdx}`;
   const host = document.getElementById(`tile_selected_${id}`);
@@ -1141,35 +1142,47 @@ function updateTileSelected(contract, origIdx) {
   const bucket = chipStore.state[id];
   if (!bucket) { host.innerHTML = ''; return; }
 
-  // Index this contract's strategies by id for O(1) P&L lookup
+  // Index this contract's strategies by id for O(1) lookup
   const byId = {};
   (contract.strategies || []).forEach((s, si) => { byId[s.strategyId] = { s, si }; });
 
   const onSids = Object.keys(bucket).filter(sid => bucket[sid].on);
   if (!onSids.length) { host.innerHTML = ''; return; }
 
-  // Sort by P&L descending so the most informative pill is first
+  // Sort by P&L descending so the strongest result reads first
   onSids.sort((a, b) => {
     const pa = byId[a]?.s.pnl ?? -Infinity;
     const pb = byId[b]?.s.pnl ?? -Infinity;
     return pb - pa;
   });
 
-  const pills = onSids.map(sid => {
+  const blocks = onSids.map(sid => {
     const entry = byId[sid];
     if (!entry) return '';
     const { s, si } = entry;
     const col = COLORS[si % COLORS.length];
     const cls = s.pnl > 0 ? 'pos' : (s.pnl < 0 ? 'neg' : '');
+    const ret = (s.retPct >= 0 ? '+' : '') + s.retPct.toFixed(1) + '%';
+    const fills = (s.entryPrice != null && s.exitPrice != null)
+      ? `Entry $${s.entryPrice.toFixed(2)} → Exit $${s.exitPrice.toFixed(2)}`
+      : '';
     return `
-      <span class="tile-strat-pill" title="${s.strategyName} · ${s.exitReason}">
-        <span class="tile-strat-dot" style="background:${col}"></span>
-        <span class="tile-strat-name">${s.strategyName}</span>
-        <span class="tile-strat-pnl ${cls}">${fmtDollars(s.pnl)}</span>
-      </span>`;
+      <div class="tile-strat-block" style="--strat-color:${col}">
+        <div class="tile-strat-block-label">
+          <span class="tile-strat-block-dot" style="background:${col}"></span>
+          Selected
+        </div>
+        <div class="tile-strat-block-name" title="${s.strategyName}">${s.strategyName}</div>
+        <div class="tile-strat-block-stats">
+          <span class="tile-pnl ${cls}">${fmtDollars(s.pnl)}</span>
+          <span class="tile-ret ${cls}">${ret}</span>
+          ${badgeFor(s.exitReason)}
+        </div>
+        ${fills ? `<div class="tile-strat-block-fills">${fills}</div>` : ''}
+      </div>`;
   }).join('');
 
-  host.innerHTML = pills;
+  host.innerHTML = blocks;
 }
 
 // Walk every tile in the grid and refresh its selected-strategies pills.
