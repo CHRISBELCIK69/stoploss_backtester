@@ -611,6 +611,36 @@ body.grid-view #contractResults > .contract-card.expanded { display: block; }
   color: var(--text-muted);
   font-family: var(--font-mono, monospace);
 }
+/* Rank pill: lives on the right of the "Selected" label row. */
+.tile-strat-block-label {
+  justify-content: flex-start;
+}
+.tile-strat-block-rank {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+/* Δ vs best — small parenthetical after the badge in the stats row. */
+.tile-strat-block-delta {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+.tile-strat-block-delta.pos { color: var(--green, #22c55e); }
+.tile-strat-block-delta.neg { color: var(--red,   #ef4444); }
+/* Context strip below fills: hold time · bars · exit time. */
+.tile-strat-block-ctx {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+  margin-top: 1px;
+}
 
 /* ── Code-fit zone — only visible when a contract card is expanded ── */
 .code-fit-zone { display: none; }

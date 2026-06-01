@@ -149,6 +149,10 @@ def process_contract(contract, bars, strategy_module, strategy_params, qty, log_
     log(f'   exit bar:  {exit_bar["time"]} | close=${exit_price:.2f} | reason={exit_reason}')
     log(f'   P&L:       ${pnl:.2f}  ({ret_pct:.1f}%)')
 
+    exit_idx   = bars.index(exit_bar)
+    bars_held  = max(0, exit_idx - entry_idx)
+    total_bars = len(bars)
+
     result = {
         'occ':          contract['occ'],
         'type':         'Call' if contract['type'] == 'C' else 'Put',
@@ -160,6 +164,8 @@ def process_contract(contract, bars, strategy_module, strategy_params, qty, log_
         'retPct':       ret_pct,
         'exitReason':   exit_reason,
         'qty':          qty,
+        'barsHeld':     bars_held,
+        'totalBars':    total_bars,
         'strategyId':   strategy_module.META['id'],
         'strategyName': strategy_module.META['name'],
     }

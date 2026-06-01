@@ -1131,10 +1131,48 @@ function renderContractTile(c, origIdx) {
   `;
 }
 
+// Format a millisecond duration as "X min" / "Xh Ym" / "Xd Yh".
+function fmtHoldDuration(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const totalMin = Math.round(ms / 60000);
+  if (totalMin < 60)  return `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24)         return m ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+
+// Extract HH:MM from a "YYYY-MM-DD HH:MM:SS" or ISO timestamp.
+function fmtTimeOfDay(ts) {
+  if (!ts || typeof ts !== 'string') return '';
+  // Look for the first " " or "T" separator, then take 5 chars.
+  const sep = Math.max(ts.indexOf(' '), ts.indexOf('T'));
+  if (sep < 0) return ts.length >= 5 ? ts.slice(0, 5) : '';
+  return ts.slice(sep + 1, sep + 6);
+}
+
+// Per-contract rank cache so we don't re-sort N strategies for every
+// selected pill. Keyed by contract.occ + strategy count signature.
+const _rankCache = new Map();
+function getStrategyRanks(contract) {
+  if (!contract || !contract.strategies) return { byId: {}, total: 0 };
+  const key = contract.occ + ':' + contract.strategies.length;
+  let cached = _rankCache.get(key);
+  if (cached) return cached;
+  const sorted = [...contract.strategies].sort((a, b) => b.pnl - a.pnl);
+  const byId = {};
+  sorted.forEach((s, i) => { byId[s.strategyId] = i + 1; });
+  cached = { byId, total: sorted.length };
+  _rankCache.set(key, cached);
+  return cached;
+}
+
 // Rebuild the "selected strategies" detail blocks inside a single tile
 // from chipStore. Each block mirrors the Best Strategy layout — name,
-// P&L, return %, exit-reason badge, and entry → exit fills — so the
-// user gets the full snapshot for every strategy they've turned on.
+// P&L, return %, exit-reason badge, and entry → exit fills — plus a
+// context strip with hold time, bars, exit time, rank, and Δ vs best.
 function updateTileSelected(contract, origIdx) {
   const id = `contract_${origIdx}`;
   const host = document.getElementById(`tile_selected_${id}`);
@@ -1156,6 +1194,10 @@ function updateTileSelected(contract, origIdx) {
     return pb - pa;
   });
 
+  const ranks   = getStrategyRanks(contract);
+  const best    = bestStrategy(contract);
+  const bestPnl = best ? best.pnl : null;
+
   const blocks = onSids.map(sid => {
     const entry = byId[sid];
     if (!entry) return '';
@@ -1166,19 +1208,59 @@ function updateTileSelected(contract, origIdx) {
     const fills = (s.entryPrice != null && s.exitPrice != null)
       ? `Entry $${s.entryPrice.toFixed(2)} → Exit $${s.exitPrice.toFixed(2)}`
       : '';
+
+    // Tier 1 context line
+    const rank = ranks.byId[sid];
+    const rankBadge = rank
+      ? `<span class="tile-strat-block-rank">#${rank} of ${ranks.total}</span>`
+      : '';
+
+    // Δ vs best — show only when this is NOT the best strat (otherwise meaningless)
+    let deltaStr = '';
+    if (bestPnl != null && best && best.strategyId !== sid) {
+      const diff = s.pnl - bestPnl;   // negative when this is worse than best
+      const dcls = diff >= 0 ? 'pos' : 'neg';
+      const sign = diff >= 0 ? '+' : '−';
+      deltaStr = `<span class="tile-strat-block-delta ${dcls}">(${sign}${fmtDollars(Math.abs(diff)).replace(/^[-+]/, '')} vs best)</span>`;
+    }
+
+    // Hold time + bars + exit time-of-day
+    let holdStr = '';
+    if (s.entryTs && s.exitTs) {
+      const t1 = new Date(s.entryTs.replace(' ', 'T'));
+      const t2 = new Date(s.exitTs.replace(' ', 'T'));
+      if (!isNaN(t1) && !isNaN(t2)) holdStr = fmtHoldDuration(t2 - t1);
+    }
+    const barsStr = (s.barsHeld != null && s.totalBars != null)
+      ? `${s.barsHeld} / ${s.totalBars} bars`
+      : '';
+    const exitTod = fmtTimeOfDay(s.exitTs);
+    const exitStr = exitTod ? `Exit ${exitTod} CST` : '';
+    const ctxParts = [
+      holdStr ? `Held ${holdStr}` : '',
+      barsStr,
+      exitStr,
+    ].filter(Boolean);
+    const ctxLine = ctxParts.length
+      ? `<div class="tile-strat-block-ctx">${ctxParts.join(' · ')}</div>`
+      : '';
+
     return `
       <div class="tile-strat-block" style="--strat-color:${col}">
         <div class="tile-strat-block-label">
           <span class="tile-strat-block-dot" style="background:${col}"></span>
           Selected
+          ${rankBadge}
         </div>
         <div class="tile-strat-block-name" title="${s.strategyName}">${s.strategyName}</div>
         <div class="tile-strat-block-stats">
           <span class="tile-pnl ${cls}">${fmtDollars(s.pnl)}</span>
           <span class="tile-ret ${cls}">${ret}</span>
           ${badgeFor(s.exitReason)}
+          ${deltaStr}
         </div>
         ${fills ? `<div class="tile-strat-block-fills">${fills}</div>` : ''}
+        ${ctxLine}
       </div>`;
   }).join('');
 
@@ -2368,6 +2450,7 @@ async function runBacktest() {
   chartInstances.forEach(c => c.destroy());
   chartInstances = [];
   chipStore.reset();
+  _rankCache.clear();
 
   const raw = document.getElementById('contractInput').value.trim();
   if (!raw) { showError('Paste at least one contract.'); return; }
