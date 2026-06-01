@@ -39,6 +39,34 @@ def append_trace(traces_dict, name, bar, price):
     })
 
 
+def append_diag(diag_dict, key, bar, value, label=None, unit='', scaleHint='generic'):
+    """
+    Helper for strategies that want to emit per-bar DIAGNOSTIC time
+    series (the signal data the strategy is acting on — VIX proxy, IV,
+    RV, deltas, etc.) — not the stop level itself.
+
+    The frontend renders these in stacked sub-panels below the price
+    chart, grouped by `scaleHint` so series on the same scale share a
+    y-axis (e.g. all 'volatility' series go in one panel).
+
+    Usage in a strategy:
+        diag = {}
+        ...
+        append_diag(diag, 'proxy_vix', bar, proxy_vix,
+                    label='Proxy VIX', unit='', scaleHint='volatility')
+        return {..., 'diagnostics': diag}
+    """
+    if value is None:
+        return
+    entry = diag_dict.setdefault(key, {
+        'series':    [],
+        'label':     label or key,
+        'unit':      unit,
+        'scaleHint': scaleHint,
+    })
+    entry['series'].append({'time': bar['time'], 'value': value})
+
+
 def should_eod_exit(bar, params):
     """
     Check if the EOD exit clause should fire on this bar.

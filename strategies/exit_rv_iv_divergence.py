@@ -25,7 +25,7 @@
 # ============================================================
 
 import math
-from backtest_engine     import should_eod_exit, append_trace
+from backtest_engine     import should_eod_exit, append_trace, append_diag
 from data_provider       import fetch_underlying_bars
 from strategies._bs_math import (
     implied_vol, years_to_expiry,
@@ -123,6 +123,7 @@ def execute(bars, entry_idx, entry_price, params):
 
     trace  = []
     extras = {}
+    diag   = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar        = bars[i]
@@ -146,13 +147,26 @@ def execute(bars, entry_idx, entry_price, params):
 
         trace.append({'time': bar['time'], 'stopPrice': hard_stop})
         append_trace(extras, 'Hard stop', bar, hard_stop)
+        # Diagnostics: IV and RV (both ×100 → VIX-like scale, shared panel).
+        # Ratio gets its own scaleHint so it doesn't squish the IV/RV lines.
+        if current_iv is not None:
+            append_diag(diag, 'current_iv', bar, round(current_iv * 100, 2),
+                        label='IV', unit='%', scaleHint='volatility')
+        if rv:
+            append_diag(diag, 'realized_vol', bar, round(rv * 100, 2),
+                        label='Realized vol', unit='%', scaleHint='volatility')
+        if current_iv and rv and rv > 0:
+            append_diag(diag, 'iv_rv_ratio', bar, round(current_iv / rv, 3),
+                        label='IV/RV ratio', unit='', scaleHint='ratio')
 
         if bar_open <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': bar_open,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
         if bar_low <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': hard_stop,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
         if bars_since >= warmup and current_iv and rv and rv > 0:
             ratio = current_iv / rv
@@ -164,12 +178,15 @@ def execute(bars, entry_idx, entry_price, params):
                         'exitType': 'iv_crush' if crush_fire else 'iv_spike',
                         'ivAtExit': round(current_iv, 4), 'rvAtExit': round(rv, 4),
                         'ivRvRatio': round(ratio, 3),
-                        'stopTrace': trace, 'extraTraces': extras}
+                        'stopTrace': trace, 'extraTraces': extras,
+                        'diagnostics': diag}
 
         if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': bar_close,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry',
             'stopPrice': float(bars[-1]['close']),
-            'stopTrace': trace, 'extraTraces': extras}
+            'stopTrace': trace, 'extraTraces': extras,
+            'diagnostics': diag}

@@ -29,7 +29,7 @@
 # ============================================================
 
 import math
-from backtest_engine     import should_eod_exit, append_trace
+from backtest_engine     import should_eod_exit, append_trace, append_diag
 from data_provider       import fetch_underlying_bars
 from strategies._bs_math import (
     implied_vol, years_to_expiry,
@@ -141,6 +141,7 @@ def execute(bars, entry_idx, entry_price, params):
 
     trace  = []
     extras = {}
+    diag   = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar       = bars[i]
@@ -191,14 +192,20 @@ def execute(bars, entry_idx, entry_price, params):
 
         trace.append({'time': bar['time'], 'stopPrice': hard_stop})
         append_trace(extras, 'Hard stop', bar, hard_stop)
-        append_trace(extras, f'VIX level ({vix_level})', bar, hard_stop)
+        # Diagnostic: per-bar proxy-VIX value, plus the trigger reference line.
+        append_diag(diag, 'proxy_vix', bar, round(proxy_vix, 2) if proxy_vix else None,
+                    label='Proxy VIX', unit='', scaleHint='volatility')
+        append_diag(diag, 'vix_trigger', bar, vix_level,
+                    label=f'Trigger ({vix_level})', unit='', scaleHint='volatility')
 
         if bar_open <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': bar_open,
-                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras}
+                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
         if bar_low <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': hard_stop,
-                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras}
+                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
         if proxy_vix is not None:
             # Determine effective trigger level
@@ -217,12 +224,15 @@ def execute(bars, entry_idx, entry_price, params):
                         'exitType': 'vix_above' if above_fire else 'vix_below',
                         'vixProxy': round(proxy_vix, 2),
                         'vixTrigger': trigger_above if above_fire else trigger_below,
-                        'stopTrace': trace, 'extraTraces': extras}
+                        'stopTrace': trace, 'extraTraces': extras,
+                        'diagnostics': diag}
 
         if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': bar_close,
-                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras}
+                    'vixProxy': proxy_vix, 'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry',
             'stopPrice': float(bars[-1]['close']),
-            'stopTrace': trace, 'extraTraces': extras}
+            'stopTrace': trace, 'extraTraces': extras,
+            'diagnostics': diag}

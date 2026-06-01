@@ -1027,6 +1027,38 @@ tr:hover td { background: var(--bg-hover); }
 /* ── Chart ────────────────────────────────── */
 .chart-wrap { height: 260px; margin-top: 16px; }
 
+/* ── Diagnostic sub-panels ────────────────────────────────────────── */
+/* One panel per scaleHint (volatility, underlying, greeks, ...).      */
+/* Auto-hidden when no strategy contributing to the panel is toggled.  */
+.diag-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+.diag-panel {
+  background: var(--bg-card, rgba(255,255,255,0.02));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px 4px;
+}
+.diag-panel-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.diag-panel-chart-wrap {
+  height: 110px;
+  position: relative;
+}
+.diag-panel-chart-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
 /* ── Error ────────────────────────────────── */
 .err { color: var(--red); font-size: 12px; margin-top: 6px; }
 

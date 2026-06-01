@@ -24,7 +24,7 @@
 #   Hard stop always active as floor.
 # ============================================================
 
-from backtest_engine     import should_eod_exit, append_trace
+from backtest_engine     import should_eod_exit, append_trace, append_diag
 from data_provider       import fetch_underlying_bars
 from strategies._bs_math import (
     implied_vol, years_to_expiry,
@@ -107,6 +107,7 @@ def execute(bars, entry_idx, entry_price, params):
 
     trace  = []
     extras = {}
+    diag   = {}
 
     for i in range(entry_idx + 1, len(bars)):
         bar        = bars[i]
@@ -130,15 +131,25 @@ def execute(bars, entry_idx, entry_price, params):
         append_trace(extras, 'Hard stop', bar, hard_stop)
         if crush_floor:
             append_trace(extras, 'IV crush floor', bar, crush_floor)
+        # Diagnostic series — IV scaled ×100 so it lives on the same y-axis
+        # as proxy-VIX (~15–50). entry_iv reference line is constant.
+        if current_iv is not None:
+            append_diag(diag, 'current_iv', bar, round(current_iv * 100, 2),
+                        label='Current IV', unit='%', scaleHint='volatility')
+        if entry_iv is not None:
+            append_diag(diag, 'entry_iv', bar, round(entry_iv * 100, 2),
+                        label='Entry IV', unit='%', scaleHint='volatility')
 
         if bar_open <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': bar_open,
                     'entryIV': entry_iv, 'ivAtExit': current_iv,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
         if bar_low <= hard_stop:
             return {'exitBar': bar, 'exitReason': 'hard_stop', 'stopPrice': hard_stop,
                     'entryIV': entry_iv, 'ivAtExit': current_iv,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
         if bars_since >= warmup and current_iv is not None and entry_iv is not None:
             # IV crush
@@ -147,20 +158,24 @@ def execute(bars, entry_idx, entry_price, params):
                         'exitType': 'iv_crush', 'entryIV': round(entry_iv, 4),
                         'ivAtExit': round(current_iv, 4),
                         'ivDropPct': round((entry_iv - current_iv) / entry_iv * 100, 1),
-                        'stopTrace': trace, 'extraTraces': extras}
+                        'stopTrace': trace, 'extraTraces': extras,
+                        'diagnostics': diag}
             # IV spike exit
             if spike_ceil and current_iv > spike_ceil:
                 return {'exitBar': bar, 'exitReason': 'trailing_stop', 'stopPrice': bar_close,
                         'exitType': 'iv_spike', 'entryIV': round(entry_iv, 4),
                         'ivAtExit': round(current_iv, 4),
                         'ivRisePct': round((current_iv - entry_iv) / entry_iv * 100, 1),
-                        'stopTrace': trace, 'extraTraces': extras}
+                        'stopTrace': trace, 'extraTraces': extras,
+                        'diagnostics': diag}
 
         if should_eod_exit(bar, params):
             return {'exitBar': bar, 'exitReason': 'eod', 'stopPrice': bar_close,
                     'entryIV': entry_iv, 'ivAtExit': current_iv,
-                    'stopTrace': trace, 'extraTraces': extras}
+                    'stopTrace': trace, 'extraTraces': extras,
+                    'diagnostics': diag}
 
     return {'exitBar': bars[-1], 'exitReason': 'expiry',
             'stopPrice': float(bars[-1]['close']),
-            'entryIV': entry_iv, 'stopTrace': trace, 'extraTraces': extras}
+            'entryIV': entry_iv, 'stopTrace': trace, 'extraTraces': extras,
+            'diagnostics': diag}

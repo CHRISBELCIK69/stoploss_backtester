@@ -286,6 +286,9 @@ let strategyFilter = {};
 function resetZoom(canvasId) {
   const inst = chartInstances.find(c => c.canvas && c.canvas.id === canvasId);
   if (inst && inst.resetZoom) inst.resetZoom();
+  // Re-sync the diagnostic sub-panels to the now-default x range.
+  const cid = canvasId.replace(/_chart$/, '');
+  syncDiagPanelXAxis(cid);
 }
 
 // ── Bracket Lab — interactive TP/SL slider ──────────
@@ -978,6 +981,8 @@ function syncApplyZoneStates() {
     else if (e.off > 0)    chip.classList.add('mixed');
   });
   refreshAllTileSelections();
+  // Diagnostic sub-panels: show/hide each series + auto-hide empty panels.
+  Object.keys(_diagPanels).forEach(refreshDiagPanelVisibility);
 }
 
 function onApplyChipSearchInput(value) {
@@ -1730,7 +1735,9 @@ function renderContractBlock(c, idx) {
           <button class="run-btn" style="padding:4px 12px;font-size:11px;margin:0;background:var(--bg-card);color:var(--text)" onclick="expandContract('${id}')">⤢ Expand</button>
         </div>
       </div>
-      <div class="chart-wrap" id="${id}_chart_wrap" style="height:620px;margin-bottom:20px"><canvas id="${id}_chart"></canvas></div>
+      <div class="chart-wrap" id="${id}_chart_wrap" style="height:620px"><canvas id="${id}_chart"></canvas></div>
+      <!-- Diagnostic sub-panels (scale-grouped per strategy) populated by buildDiagnosticPanels() -->
+      <div class="diag-panels" id="${id}_diag_panels" data-contract="${id}" style="margin-bottom:20px"></div>
 
       <!-- ── Bracket Lab — interactive TP/SL slider ──────────── -->
       <div class="bracket-lab" id="${id}_lab" data-occ="${c.occ}" data-entry-date="${c.entryDate}"
@@ -1821,12 +1828,14 @@ function renderContractBlock(c, idx) {
 
 // ── Build the price + stop overlay chart ───
 function buildChart(c, idx) {
-  const canvasId = `contract_${idx}_chart`;
+  const canvasId   = `contract_${idx}_chart`;
+  const contractId = `contract_${idx}`;
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
 
   const bars       = c.bars || [];
   const strategies = c.strategies || [];
+  const crosshair  = _makeCrosshairPlugin(contractId);
 
   // Parse "YYYY-MM-DD HH:MM" → ms since epoch in local time.
   // Times come from the backend already in US/Eastern (see data_provider
@@ -2178,7 +2187,7 @@ function buildChart(c, idx) {
   const chart = new Chart(canvas, {
     type: 'line',
     data: { datasets },
-    plugins: [exitLabelPlugin, inlineTraceLabels],
+    plugins: [exitLabelPlugin, inlineTraceLabels, crosshair],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -2230,12 +2239,22 @@ function buildChart(c, idx) {
           },
         },
         zoom: {
-          pan:  { enabled: true, mode: 'xy', modifierKey: 'shift' },
+          pan:  {
+            enabled: true, mode: 'xy', modifierKey: 'shift',
+            onPanComplete: ({ chart: ch }) => {
+              const cid = ch.canvas.id.replace(/_chart$/, '');
+              syncDiagPanelXAxis(cid);
+            },
+          },
           zoom: {
             wheel: { enabled: true, speed: 0.1 },
             pinch: { enabled: true },
             drag:  { enabled: true, backgroundColor: 'rgba(108,140,255,0.15)', borderColor: '#6c8cff', borderWidth: 1 },
             mode:  'xy',
+            onZoomComplete: ({ chart: ch }) => {
+              const cid = ch.canvas.id.replace(/_chart$/, '');
+              syncDiagPanelXAxis(cid);
+            },
           },
           limits: {
             y: { minRange: 0.05 },
@@ -2294,7 +2313,7 @@ function buildChart(c, idx) {
   // but if a user clicked a global apply chip while this card was still
   // collapsed (chart not yet built), the store will already say "on" for
   // those (contract, strategy) pairs and we honor it on build.
-  const contractId = chart.canvas.id.replace(/_chart$/, '');
+  // contractId is in scope from the top of buildChart.
   chipStore.primeFromChart(contractId, chart);
   chart.data.datasets.forEach((ds, idx) => {
     if (ds.strategyId === undefined) return;
@@ -2311,8 +2330,268 @@ function buildChart(c, idx) {
     if (chip) chip.classList.toggle('off', !(e && e.on));
   });
   chart.update();
+
+  // ── v2/v3: scale-grouped diagnostic sub-panels + synced crosshair ──
+  buildDiagnosticPanels(contractId, c, chart);
+  attachCrosshair(contractId, chart);
+  syncDiagPanelXAxis(contractId);
+  refreshDiagPanelVisibility(contractId);
 }
 
+
+// ───────────────────────────────────────────────────────────────────
+// Diagnostic sub-panels
+//
+// Strategies emit per-bar diagnostic series in their result under the
+// 'diagnostics' key. Each series carries a 'scaleHint' (volatility,
+// underlying, greek, ratio, generic, …) so series on the same scale
+// share a y-axis and live in one sub-panel below the main chart.
+//
+// Multiple strategies can contribute to the same panel — e.g. proxy_vix
+// from vix_trigger and current_iv (×100) from iv_crush both land in the
+// 'volatility' panel. Toggling a strategy's chip shows/hides only its
+// contribution; the panel auto-hides when all its series are off.
+//
+// Pan/zoom on the main chart propagates to every sub-panel and back, so
+// the time axis stays locked across the entire stack.
+// ───────────────────────────────────────────────────────────────────
+
+// _diagPanels[contractId] = [{chart, scaleHint, container}]
+const _diagPanels = {};
+// _hoverX[contractId] = ms — the current crosshair x position for a contract
+const _hoverX = {};
+
+function _resetDiagState(contractId) {
+  if (_diagPanels[contractId]) {
+    _diagPanels[contractId].forEach(p => { try { p.chart.destroy(); } catch (_) {} });
+    delete _diagPanels[contractId];
+  }
+  delete _hoverX[contractId];
+  const host = document.getElementById(`${contractId}_diag_panels`);
+  if (host) host.innerHTML = '';
+}
+
+// Pretty label per scale group
+const SCALE_LABELS = {
+  volatility: 'Volatility',
+  underlying: 'Underlying',
+  greek:      'Greeks',
+  ratio:      'Ratio',
+  volume:     'Volume',
+  range:      'Range',
+  generic:    'Indicators',
+};
+
+// Crosshair plugin instance — drawn into the main chart and every sub-panel.
+// Reads _hoverX[contractId] (the current cross-chart hover anchor) and draws
+// a vertical line through every chart in the group.
+function _makeCrosshairPlugin(contractId) {
+  return {
+    id: 'crosshair_' + contractId,
+    afterDatasetsDraw(chart) {
+      const ms = _hoverX[contractId];
+      if (ms == null) return;
+      const x = chart.scales.x.getPixelForValue(ms);
+      const { top, bottom, left, right } = chart.chartArea;
+      if (x < left || x > right) return;
+      const ctx = chart.ctx;
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1;
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+      ctx.stroke();
+      ctx.restore();
+    },
+  };
+}
+
+// Attach mouse-move handlers + a per-chart crosshair plugin to the main
+// chart. The plugin is also passed into every sub-panel inside
+// buildDiagnosticPanels so the vertical line stays synced across the
+// whole stack. We do NOT Chart.register globally — that would bleed
+// crosshairs into unrelated contracts.
+function attachCrosshair(contractId, mainChart) {
+  const onMove = (event) => {
+    const rect = mainChart.canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const ms = mainChart.scales.x.getValueForPixel(px);
+    _hoverX[contractId] = ms;
+    mainChart.update('none');
+    (_diagPanels[contractId] || []).forEach(p => p.chart.update('none'));
+  };
+  const onLeave = () => {
+    delete _hoverX[contractId];
+    mainChart.update('none');
+    (_diagPanels[contractId] || []).forEach(p => p.chart.update('none'));
+  };
+  mainChart.canvas.addEventListener('mousemove', onMove);
+  mainChart.canvas.addEventListener('mouseleave', onLeave);
+  // Plugin itself is now registered at construction time inside buildChart()
+  // via the `plugins:` array — scoped per-chart, no global registry pollution.
+}
+
+// Build all sub-panels for a contract. Idempotent — destroys any previous
+// panels for this contract first.
+function buildDiagnosticPanels(contractId, contract, mainChart) {
+  _resetDiagState(contractId);
+  const host = document.getElementById(`${contractId}_diag_panels`);
+  if (!host) return;
+
+  // 1. Gather all series, grouped by scaleHint.
+  // group[scaleHint] = [{ strategyId, key, label, unit, series, color }, ...]
+  const group = {};
+  (contract.strategies || []).forEach((s, si) => {
+    const diag = s.diagnostics || {};
+    Object.entries(diag).forEach(([key, def]) => {
+      if (!def || !Array.isArray(def.series) || !def.series.length) return;
+      const hint = def.scaleHint || 'generic';
+      const arr  = group[hint] || (group[hint] = []);
+      arr.push({
+        strategyId: s.strategyId,
+        strategyName: s.strategyName,
+        key,
+        label: def.label || key,
+        unit:  def.unit  || '',
+        series: def.series,
+        color:  COLORS[si % COLORS.length],
+      });
+    });
+  });
+
+  // No diagnostics anywhere → just leave the host empty.
+  const hints = Object.keys(group);
+  if (!hints.length) return;
+
+  // Determine the time window from the main chart so panels start in sync.
+  const xMin = mainChart.scales.x.min;
+  const xMax = mainChart.scales.x.max;
+  const crosshair = _makeCrosshairPlugin(contractId);
+
+  _diagPanels[contractId] = [];
+
+  hints.forEach((hint, hi) => {
+    const items = group[hint];
+    const panelId = `${contractId}_diag_${hint}`;
+    const wrap = document.createElement('div');
+    wrap.className = 'diag-panel';
+    wrap.dataset.scaleHint = hint;
+    wrap.innerHTML = `
+      <div class="diag-panel-label">${SCALE_LABELS[hint] || hint}</div>
+      <div class="diag-panel-chart-wrap"><canvas id="${panelId}"></canvas></div>`;
+    host.appendChild(wrap);
+
+    const datasets = items.map(item => ({
+      label: `${item.strategyName} · ${item.label}`,
+      data:  item.series.map(p => ({
+        x: new Date(String(p.time).replace(' ', 'T')).getTime(),
+        y: p.value,
+      })),
+      borderColor: item.color,
+      backgroundColor: 'transparent',
+      pointRadius: 0,
+      borderWidth: 1.4,
+      tension: 0.1,
+      spanGaps: true,
+      strategyId: item.strategyId,
+      _diagSeries: true,
+      _seriesKey: item.key,
+      _unit: item.unit,
+    }));
+
+    const canvas = document.getElementById(panelId);
+    if (!canvas) return;
+
+    const subChart = new Chart(canvas, {
+      type: 'line',
+      data: { datasets },
+      plugins: [crosshair],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e222d',
+            titleColor: '#ccc',
+            bodyColor:  '#eee',
+            borderColor: '#333',
+            borderWidth: 1,
+            callbacks: {
+              title: items => items.length ? (new Date(items[0].parsed.x)).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '',
+              label: ctx => {
+                const v = ctx.parsed.y;
+                if (v == null) return null;
+                const unit = ctx.dataset._unit || '';
+                return ` ${ctx.dataset.label}: ${v}${unit}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            min: xMin, max: xMax,
+            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm' } },
+            grid: { display: false },
+            ticks: { color: '#555', font: { size: 9 }, autoSkip: true, maxTicksLimit: 10 },
+          },
+          y: {
+            grid: { color: 'rgba(128,128,128,0.06)' },
+            ticks: { color: '#888', font: { size: 9 } },
+          },
+        },
+      },
+    });
+
+    // Default all series off — chipStore-driven visibility takes over next.
+    subChart.data.datasets.forEach((_, idx) => subChart.setDatasetVisibility(idx, false));
+    _diagPanels[contractId].push({ chart: subChart, scaleHint: hint, container: wrap });
+  });
+}
+
+// Push the main chart's x-range into every sub-panel. Called whenever the
+// user pans/zooms on the main chart (via the zoom-plugin hooks below).
+function syncDiagPanelXAxis(contractId) {
+  const panels = _diagPanels[contractId];
+  if (!panels || !panels.length) return;
+  const main = chartInstances.find(c => c && c.canvas && c.canvas.id === contractId + '_chart');
+  if (!main) return;
+  const xMin = main.scales.x.min;
+  const xMax = main.scales.x.max;
+  panels.forEach(p => {
+    p.chart.options.scales.x.min = xMin;
+    p.chart.options.scales.x.max = xMax;
+    p.chart.update('none');
+  });
+}
+
+// Show/hide diagnostic series based on whether their parent strategy's
+// chip is on. Then hide whole panels that have no visible series, and
+// hide the entire host container if no panel is visible.
+function refreshDiagPanelVisibility(contractId) {
+  const panels = _diagPanels[contractId];
+  if (!panels) return;
+  let anyPanelVisible = false;
+  panels.forEach(p => {
+    let anySeriesVisible = false;
+    p.chart.data.datasets.forEach((ds, idx) => {
+      const e = chipStore.get(contractId, ds.strategyId);
+      const on = !!(e && e.on);
+      p.chart.setDatasetVisibility(idx, on);
+      if (on) anySeriesVisible = true;
+    });
+    p.container.style.display = anySeriesVisible ? '' : 'none';
+    if (anySeriesVisible) anyPanelVisible = true;
+    p.chart.update('none');
+  });
+  const host = document.getElementById(`${contractId}_diag_panels`);
+  if (host) host.style.display = anyPanelVisible ? '' : 'none';
+}
 
 // ── Timing breakdown ───────────────────────────────
 function renderTimings(t) {
@@ -2588,6 +2867,7 @@ async function runBacktest() {
   chartInstances = [];
   chipStore.reset();
   _rankCache.clear();
+  Object.keys(_diagPanels).forEach(_resetDiagState);
 
   const raw = document.getElementById('contractInput').value.trim();
   if (!raw) { showError('Paste at least one contract.'); return; }
