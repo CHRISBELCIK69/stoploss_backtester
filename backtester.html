@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Options contract backtester</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <link rel="stylesheet" href="backtester.css" />
@@ -349,47 +350,48 @@ function overlayLabResultOnChart(contractId, result, tp, sl) {
   // Remove any previous lab datasets
   chart.data.datasets = chart.data.datasets.filter(d => !d.isLabResult);
 
-  // Build the time → idx map for this chart
-  const labels = chart.data.labels;
-  const labelsLen = labels.length;
-  const barTimes = chart.data.datasets[0]?._barTimes || [];   // we'll set this when building chart
+  // Find the dataset that has _barTimes (the Premium line) — it carries
+  // the full bar-time list we need to map trace points back to chart x's.
+  const premiumDs = chart.data.datasets.find(d => Array.isArray(d._barTimes));
+  const barTimes  = premiumDs ? premiumDs._barTimes : [];
+  if (!barTimes.length) { chart.update(); return; }
 
-  // Fallback: rebuild timeIdx from any non-null primary dataset
-  // We just need to map result.stopTrace times → chart x-indices.
-  const timeIdx = {};
-  // The label uses bar.time slice(11,16) — but we need full times.
-  // Use the chart's stored bar times if present:
-  (barTimes.length ? barTimes : []).forEach((t, i) => { timeIdx[t] = i; });
+  // Pre-parse bar times → ms once; trace lookup hits the parsed array.
+  const tsToMs = (ts) => {
+    const t = new Date(String(ts).replace(' ', 'T'));
+    const ms = t.getTime();
+    return Number.isNaN(ms) ? null : ms;
+  };
+  const barMs = barTimes.map(tsToMs);
+  const tsIdx = {};
+  barTimes.forEach((t, i) => { tsIdx[t] = i; });
 
-  // If we don't have stored bar times, infer from the trace times' positions.
-  // The chart's price line has the same length as bars[], so we map sequentially.
   const trace  = result.stopTrace || [];
   const extras = result.extraTraces || {};
 
-  // Build primary stop-line series
-  const stopData = new Array(labelsLen).fill(null);
-  const tpData   = new Array(labelsLen).fill(null);
-  const slData   = new Array(labelsLen).fill(null);
-
-  trace.forEach((t, k) => {
-    const idx = timeIdx[t.time] !== undefined ? timeIdx[t.time] : null;
-    if (idx !== null) stopData[idx] = t.stopPrice;
+  // Build per-bar value arrays, then zip with barMs into {x, y} pairs.
+  const stopVals = new Array(barTimes.length).fill(null);
+  const tpVals   = new Array(barTimes.length).fill(null);
+  const slVals   = new Array(barTimes.length).fill(null);
+  trace.forEach(t => {
+    const idx = tsIdx[t.time]; if (idx !== undefined) stopVals[idx] = t.stopPrice;
   });
   (extras['Take profit'] || []).forEach(t => {
-    const idx = timeIdx[t.time]; if (idx !== undefined) tpData[idx] = t.stopPrice;
+    const idx = tsIdx[t.time]; if (idx !== undefined) tpVals[idx] = t.stopPrice;
   });
   (extras['Stop loss'] || []).forEach(t => {
-    const idx = timeIdx[t.time]; if (idx !== undefined) slData[idx] = t.stopPrice;
+    const idx = tsIdx[t.time]; if (idx !== undefined) slVals[idx] = t.stopPrice;
   });
+  const xy = (vals) => vals.map((v, i) => ({ x: barMs[i], y: v }));
 
   // Find exit marker index — match by exitTs string
   let exitIdx = -1;
-  if (result.exitTs && timeIdx[result.exitTs] !== undefined) exitIdx = timeIdx[result.exitTs];
+  if (result.exitTs && tsIdx[result.exitTs] !== undefined) exitIdx = tsIdx[result.exitTs];
 
   // TP target line — green-amber
   chart.data.datasets.push({
     label: `Lab · Take profit (${tp}%)`,
-    data:  tpData,
+    data:  xy(tpVals),
     borderColor: 'rgba(29, 158, 117, 0.95)',
     backgroundColor: 'transparent',
     pointRadius: 0,
@@ -403,7 +405,7 @@ function overlayLabResultOnChart(contractId, result, tp, sl) {
   // SL stop line — red
   chart.data.datasets.push({
     label: `Lab · Stop loss (${sl}%)`,
-    data:  slData,
+    data:  xy(slVals),
     borderColor: 'rgba(226, 75, 74, 0.95)',
     backgroundColor: 'transparent',
     pointRadius: 0,
@@ -417,15 +419,15 @@ function overlayLabResultOnChart(contractId, result, tp, sl) {
   // Primary lab line — amber, with exit marker
   chart.data.datasets.push({
     label: `Lab · Bracket TP${tp}/SL${sl}`,
-    data: stopData,
+    data: xy(stopVals),
     borderColor: LAB_COLOR,
     backgroundColor: 'transparent',
-    pointRadius: stopData.map((v, i) => i === exitIdx ? 12 : 0),
-    pointStyle:  stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+    pointRadius: stopVals.map((v, i) => i === exitIdx ? 12 : 0),
+    pointStyle:  stopVals.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
     pointBackgroundColor: LAB_COLOR,
     pointBorderColor: '#ffffff',
-    pointBorderWidth: stopData.map((v, i) => i === exitIdx ? 3 : 0),
-    pointHoverRadius: stopData.map((v, i) => i === exitIdx ? 14 : 0),
+    pointBorderWidth: stopVals.map((v, i) => i === exitIdx ? 3 : 0),
+    pointHoverRadius: stopVals.map((v, i) => i === exitIdx ? 14 : 0),
     borderWidth: 2.5,
     borderDash: [6, 3],
     tension: 0.1,
@@ -1466,33 +1468,42 @@ function overlayCustomResultOnChart(contractId, result) {
   // Wipe any prior custom overlay
   chart.data.datasets = chart.data.datasets.filter(d => !d.isCustomResult);
 
-  const labels = chart.data.labels;
-  const labelsLen = labels.length;
-  const barTimes = chart.data.datasets[0]?._barTimes || [];
-  const timeIdx = {};
-  barTimes.forEach((t, i) => { timeIdx[t] = i; });
+  // Pull bar times off the Premium dataset (not by hardcoded index).
+  const premiumDs = chart.data.datasets.find(d => Array.isArray(d._barTimes));
+  const barTimes  = premiumDs ? premiumDs._barTimes : [];
+  if (!barTimes.length) { chart.update(); return; }
+
+  const tsToMs = (ts) => {
+    const t = new Date(String(ts).replace(' ', 'T'));
+    const ms = t.getTime();
+    return Number.isNaN(ms) ? null : ms;
+  };
+  const barMs = barTimes.map(tsToMs);
+  const tsIdx = {};
+  barTimes.forEach((t, i) => { tsIdx[t] = i; });
 
   const trace  = result.stopTrace || [];
-  const stopData = new Array(labelsLen).fill(null);
+  const stopVals = new Array(barTimes.length).fill(null);
   trace.forEach(t => {
-    const idx = timeIdx[t.time];
-    if (idx !== undefined) stopData[idx] = t.stopPrice;
+    const idx = tsIdx[t.time];
+    if (idx !== undefined) stopVals[idx] = t.stopPrice;
   });
+  const stopData = stopVals.map((v, i) => ({ x: barMs[i], y: v }));
 
   let exitIdx = -1;
-  if (result.exitTs && timeIdx[result.exitTs] !== undefined) exitIdx = timeIdx[result.exitTs];
+  if (result.exitTs && tsIdx[result.exitTs] !== undefined) exitIdx = tsIdx[result.exitTs];
 
   chart.data.datasets.push({
     label: `Custom fit · P&L ${fmtDollars(result.pnl)}`,
     data: stopData,
     borderColor: '#fb923c',     // orange — distinct from amber Bracket Lab
     backgroundColor: 'transparent',
-    pointRadius: stopData.map((v, i) => i === exitIdx ? 12 : 0),
-    pointStyle:  stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+    pointRadius: stopVals.map((v, i) => i === exitIdx ? 12 : 0),
+    pointStyle:  stopVals.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
     pointBackgroundColor: '#fb923c',
     pointBorderColor: '#ffffff',
-    pointBorderWidth: stopData.map((v, i) => i === exitIdx ? 3 : 0),
-    pointHoverRadius: stopData.map((v, i) => i === exitIdx ? 14 : 0),
+    pointBorderWidth: stopVals.map((v, i) => i === exitIdx ? 3 : 0),
+    pointHoverRadius: stopVals.map((v, i) => i === exitIdx ? 14 : 0),
     borderWidth: 2.5,
     borderDash: [6, 3],
     tension: 0.1,
@@ -1817,24 +1828,32 @@ function buildChart(c, idx) {
   const bars       = c.bars || [];
   const strategies = c.strategies || [];
 
-  // Time labels (show every Nth for readability)
-  const labels = bars.map(b => b.time.slice(11, 16));
+  // Parse "YYYY-MM-DD HH:MM" → ms since epoch in local time.
+  // Times come from the backend already in US/Eastern (see data_provider
+  // _ms_to_eastern). For chart-axis display we treat them as local clock
+  // times — they read correctly without TZ math because the adapter
+  // formats whatever ms we hand it.
+  const tsToMs = (ts) => {
+    if (!ts || typeof ts !== 'string') return null;
+    // Accept "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM[:SS]"
+    const t = new Date(ts.replace(' ', 'T'));
+    const ms = t.getTime();
+    return Number.isNaN(ms) ? null : ms;
+  };
 
-  // Price line (close prices)
-  const closePrices = bars.map(b => b.close);
-  const highPrices  = bars.map(b => b.high);
-  const lowPrices   = bars.map(b => b.low);
+  // Precompute every bar's ms so we don't re-parse 600+ times per dataset.
+  const barMs = bars.map(b => tsToMs(b.time));
 
-  // Build a time→index map for aligning stop traces to bars
-  const timeIdx = {};
-  bars.forEach((b, i) => { timeIdx[b.time] = i; });
+  // Build a time→ms map for aligning stop traces / exit markers to bars.
+  const tsIdx = {};
+  bars.forEach((b, i) => { tsIdx[b.time] = i; });
 
   const datasets = [];
 
   // Price high/low range as a filled band
   datasets.push({
     label: 'High',
-    data: highPrices,
+    data: bars.map((b, i) => ({ x: barMs[i], y: b.high })),
     borderColor: 'rgba(255,255,255,0.15)',
     backgroundColor: 'rgba(255,255,255,0.03)',
     fill: '+1',
@@ -1845,7 +1864,7 @@ function buildChart(c, idx) {
   });
   datasets.push({
     label: 'Low',
-    data: lowPrices,
+    data: bars.map((b, i) => ({ x: barMs[i], y: b.low })),
     borderColor: 'rgba(255,255,255,0.15)',
     backgroundColor: 'transparent',
     pointRadius: 0,
@@ -1855,11 +1874,11 @@ function buildChart(c, idx) {
   });
 
   // Price close as the main line — extra thick so it pops over the stop lines.
-  // Also store the full bar times array on this dataset so the Bracket Lab
-  // can map its result's trace times back to chart x-indices.
+  // Synthetic-bar segments render at 40% opacity so the eye can tell
+  // "this minute was extrapolated" from "this minute is real."
   datasets.push({
     label: 'Premium (close)',
-    data: closePrices,
+    data: bars.map((b, i) => ({ x: barMs[i], y: b.close })),
     borderColor: '#ffffff',
     backgroundColor: 'transparent',
     pointRadius: 0,
@@ -1867,14 +1886,28 @@ function buildChart(c, idx) {
     tension: 0.15,
     order: 0,
     _barTimes: bars.map(b => b.time),
+    _synthetic: bars.map(b => !!b.synthetic),
+    // Per-segment styling: dim the line where it's connecting a synthetic
+    // bar so the user sees a visible "this was inferred" cue rather than
+    // a flat misleading line at full opacity.
+    segment: {
+      borderColor: (ctx) => {
+        const a = !!(bars[ctx.p0DataIndex] && bars[ctx.p0DataIndex].synthetic);
+        const b = !!(bars[ctx.p1DataIndex] && bars[ctx.p1DataIndex].synthetic);
+        return (a && b) ? 'rgba(255,255,255,0.25)' : '#ffffff';
+      },
+    },
   });
 
-  // Entry price reference line
+  // Entry price reference line — flat line spanning the full time range
   const entryPrice = strategies.length ? strategies[0].entryPrice : null;
-  if (entryPrice !== null) {
+  if (entryPrice !== null && barMs.length) {
     datasets.push({
       label: 'Entry price',
-      data: bars.map(() => entryPrice),
+      data: [
+        { x: barMs[0],                y: entryPrice },
+        { x: barMs[barMs.length - 1], y: entryPrice },
+      ],
       borderColor: 'rgba(255,255,255,0.3)',
       borderDash: [4, 4],
       pointRadius: 0,
@@ -1891,53 +1924,49 @@ function buildChart(c, idx) {
   // One stop-level line per strategy
   strategies.forEach((strat, si) => {
     const trace = strat.stopTrace || [];
-    // Map trace to bar indices — fill nulls where no trace data
-    const stopData = new Array(bars.length).fill(null);
+    // Map trace points to bar slots — index by bar position, value is the
+    // stop price at that minute (or null if no trace point lands there).
+    const stopVals = new Array(bars.length).fill(null);
     trace.forEach(t => {
-      const bi = timeIdx[t.time];
-      if (bi !== undefined) stopData[bi] = t.stopPrice;
+      const bi = tsIdx[t.time];
+      if (bi !== undefined) stopVals[bi] = t.stopPrice;
     });
+    const stopData = stopVals.map((v, i) => ({ x: barMs[i], y: v }));
 
     const color = COLORS[si % COLORS.length];
 
-    // Mark the exit point
-    const exitIdx = timeIdx[strat.exitTs];
+    // Mark the exit point — index into the bars array
+    const exitIdx = tsIdx[strat.exitTs];
 
     datasets.push({
       label: strat.strategyName,
       data: stopData,
       borderColor: color,
       backgroundColor: 'transparent',
-      pointRadius: stopData.map((v, i) => i === exitIdx ? markerSize : 0),
-      pointStyle: stopData.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
+      pointRadius: stopVals.map((v, i) => i === exitIdx ? markerSize : 0),
+      pointStyle:  stopVals.map((v, i) => i === exitIdx ? 'rectRot' : 'circle'),
       pointBackgroundColor: color,
       pointBorderColor: '#ffffff',
-      pointBorderWidth: stopData.map((v, i) => i === exitIdx ? (isDense ? 1.5 : 3) : 0),
-      pointHoverRadius: stopData.map((v, i) => i === exitIdx ? markerSize + 4 : 0),
+      pointBorderWidth: stopVals.map((v, i) => i === exitIdx ? (isDense ? 1.5 : 3) : 0),
+      pointHoverRadius: stopVals.map((v, i) => i === exitIdx ? markerSize + 4 : 0),
       borderWidth: lineWidth,
       borderDash: [4, 3],
       tension: 0.1,
       spanGaps: true,
       order: 2 + si,
-      // Custom metadata for chip-toggle linking:
       strategyId:   strat.strategyId,
       isPrimary:    true,
     });
 
     // ─── Extra traces (multi-level visualization) ──────────────
-    // Each strategy can return an `extraTraces` dict. We render each
-    // extra in a tinted version of the strategy's color based on its
-    // semantic role: red-tinted for safety nets (hard stops, lower
-    // bands), green-tinted for upside targets (profit targets, upper
-    // bands, break-even). Same hue family per strategy, different
-    // shade per function. The eye reads role at a glance.
     const extras = strat.extraTraces || {};
     Object.entries(extras).forEach(([traceName, traceData]) => {
-      const extraData = new Array(bars.length).fill(null);
+      const extraVals = new Array(bars.length).fill(null);
       (traceData || []).forEach(t => {
-        const bi = timeIdx[t.time];
-        if (bi !== undefined) extraData[bi] = t.stopPrice;
+        const bi = tsIdx[t.time];
+        if (bi !== undefined) extraVals[bi] = t.stopPrice;
       });
+      const extraData = extraVals.map((v, i) => ({ x: barMs[i], y: v }));
       const extraColor = extraColorForRole(color, traceName);
       datasets.push({
         label: `${strat.strategyName} · ${traceName}`,
@@ -1946,10 +1975,10 @@ function buildChart(c, idx) {
         backgroundColor: 'transparent',
         pointRadius: 0,
         borderWidth: isDense ? 0.9 : 1.3,
-        borderDash: [1, 4],  // tight dotted — visually subordinate to primary's dashed
+        borderDash: [1, 4],
         tension: 0.1,
         spanGaps: true,
-        order: 5 + si,       // render UNDER primary
+        order: 5 + si,
         strategyId:   strat.strategyId,
         isPrimary:    false,
       });
@@ -1965,7 +1994,7 @@ function buildChart(c, idx) {
     afterDatasetsDraw(chart) {
       const { ctx } = chart;
       strategies.forEach((strat, si) => {
-        const exitIdx = timeIdx[strat.exitTs];
+        const exitIdx = tsIdx[strat.exitTs];
         if (exitIdx === undefined) return;
         const isEarlyExit = exitIdx < bars.length * 0.25;
         if (!labelAll && !isEarlyExit) return;
@@ -2037,9 +2066,11 @@ function buildChart(c, idx) {
         // Find the last non-null point INSIDE the current x-axis view —
         // when the user zooms, labels stay anchored to the right edge of
         // what they can actually see, not the dataset's true tail.
+        // Datasets now hold {x, y} objects, so null-check the .y.
         let lastIdx = -1;
         for (let i = data.length - 1; i >= 0; i--) {
-          if (data[i] === null || data[i] === undefined) continue;
+          const d = data[i];
+          if (d == null || d.y == null) continue;
           const p = meta.data[i];
           if (!p) continue;
           if (p.x < chartArea.left - 4 || p.x > chartArea.right + 4) continue;
@@ -2057,7 +2088,8 @@ function buildChart(c, idx) {
         let text = ds.label || '';
         const dotIdx = text.indexOf(' · ');
         if (dotIdx !== -1) text = text.slice(dotIdx + 3);
-        text += ` $${Number(data[lastIdx]).toFixed(2)}`;
+        const yVal = (data[lastIdx] && data[lastIdx].y != null) ? data[lastIdx].y : NaN;
+        text += ` $${Number(yVal).toFixed(2)}`;
 
         labels.push({
           x: point.x,
@@ -2117,12 +2149,16 @@ function buildChart(c, idx) {
 
   const chart = new Chart(canvas, {
     type: 'line',
-    data: { labels, datasets },
+    data: { datasets },
     plugins: [exitLabelPlugin, inlineTraceLabels],
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      // 'nearest' mode + intersect:false → tooltip snaps to the closest
+      // point in REAL time (the time scale below uses pixel distance,
+      // which is now proportional to actual minutes elapsed because the
+      // backend pads minute gaps with synthetic carry-forward bars).
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       plugins: {
         legend: {
           position: 'top',
@@ -2180,6 +2216,22 @@ function buildChart(c, idx) {
       },
       scales: {
         x: {
+          // Time scale — ticks land on round-minute boundaries (10:00,
+          // 10:05, 10:10) instead of arbitrary slots, and points are
+          // spaced by REAL time elapsed instead of by sequence index.
+          // Backend now fills minute gaps with synthetic carry-forward
+          // bars, so spacing is correct without "skipping" 10:02–10:04
+          // when a quiet contract has no prints there.
+          type: 'time',
+          time: {
+            unit: 'minute',
+            tooltipFormat: 'MMM d, HH:mm',
+            displayFormats: {
+              minute: 'HH:mm',
+              hour:   'HH:mm',
+              day:    'MMM d',
+            },
+          },
           grid: { display: false },
           ticks: {
             color: '#555',
@@ -2187,6 +2239,7 @@ function buildChart(c, idx) {
             maxRotation: 0,
             autoSkip: true,
             maxTicksLimit: 20,
+            source: 'auto',
           },
         },
         y: {

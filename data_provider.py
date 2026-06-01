@@ -7,7 +7,7 @@
 # ============================================================
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
@@ -132,12 +132,66 @@ def fetch_bars(occ, start_date, end_date, cfg):
     Fetch 1-minute OHLCV bars for an option contract from Polygon.
 
     Returns bars normalised to:
-      [{ 'time': 'YYYY-MM-DD HH:MM', 'open', 'high', 'low', 'close', 'volume', 'vwap' }, ...]
+      [{ 'time': 'YYYY-MM-DD HH:MM', 'open', 'high', 'low', 'close', 'volume', 'vwap',
+         'synthetic': bool }, ...]
+
+    Polygon returns bars only for minutes with at least one trade. For
+    illiquid contracts that produces visible gaps (10:00 → 10:01 → 10:05)
+    on the chart and breaks strategies that count bars. We pad missing
+    minutes with carry-forward synthetic bars (close = prev close, volume = 0)
+    so the time series is continuous within each trading session.
     """
     api_key = cfg.get('polygon', {}).get('apiKey', '').strip()
     if not api_key or api_key == 'YOUR_POLYGON_API_KEY_HERE':
         raise ValueError('Open config.py and set polygon.apiKey')
-    return fetch_time_sales_polygon(occ, start_date, end_date, api_key)
+    raw = fetch_time_sales_polygon(occ, start_date, end_date, api_key)
+    return _pad_minute_gaps(raw)
+
+
+def _pad_minute_gaps(bars, max_gap_minutes=30):
+    """
+    Fill missing intraday minutes with carry-forward synthetic bars.
+
+    Gaps > max_gap_minutes (overnight / lunch / halts) are NOT padded —
+    those represent real session boundaries, not data holes.
+
+    Real bars get synthetic=False so strategies and the chart can
+    distinguish "we know what happened here" from "we extrapolated."
+    """
+    if not bars:
+        return bars
+
+    # Tag every real bar with synthetic=False
+    for b in bars:
+        b['synthetic'] = False
+
+    out = [bars[0]]
+    for cur in bars[1:]:
+        prev = out[-1]
+        try:
+            t_prev = datetime.strptime(prev['time'], '%Y-%m-%d %H:%M')
+            t_cur  = datetime.strptime(cur['time'],  '%Y-%m-%d %H:%M')
+        except (ValueError, TypeError):
+            out.append(cur)
+            continue
+        gap_min = int((t_cur - t_prev).total_seconds() // 60)
+        if 1 < gap_min <= max_gap_minutes:
+            # Insert (gap_min - 1) carry-forward synthetic bars
+            carry = prev['close']
+            for k in range(1, gap_min):
+                t_fill = t_prev + timedelta(minutes=k)
+                out.append({
+                    'time':      t_fill.strftime('%Y-%m-%d %H:%M'),
+                    'open':      carry,
+                    'high':      carry,
+                    'low':       carry,
+                    'close':     carry,
+                    'volume':    0,
+                    'vwap':      carry,
+                    'synthetic': True,
+                })
+        out.append(cur)
+    return out
 
 
 def fetch_underlying_bars(ticker, start_date, end_date, cfg):
