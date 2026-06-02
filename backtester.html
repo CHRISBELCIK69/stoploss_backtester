@@ -2373,9 +2373,17 @@ function _resetDiagState(contractId) {
 
 // Pretty label per scale group
 const SCALE_LABELS = {
-  volatility: 'Volatility',
+  volatility: 'Volatility (IV / VIX, %)',
   underlying: 'Underlying',
-  greek:      'Greeks',
+  // Individual greek panels — auto-emitted by backtest_engine for any
+  // strategy that uses bar['greeks']. Each greek lives on its own scale
+  // because the magnitudes are wildly different (delta 0–1, gamma 0–0.5,
+  // theta in $/day, vega in $/1% IV).
+  delta:      'Delta',
+  gamma:      'Gamma',
+  theta:      'Theta ($/day)',
+  vega:       'Vega ($/1% IV)',
+  greek:      'Greeks',         // legacy / catch-all for explicit emitters
   ratio:      'Ratio',
   volume:     'Volume',
   range:      'Range',

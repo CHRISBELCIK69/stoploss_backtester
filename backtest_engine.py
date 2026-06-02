@@ -204,4 +204,69 @@ def process_contract(contract, bars, strategy_module, strategy_params, qty, log_
         if k not in skip_keys:
             result[k] = v
 
+    # ── Auto-emit standard greeks as diagnostics ──────────────
+    # Any bar enriched by strategies/_bs_math.enrich_bars_with_greeks
+    # carries bar['greeks'] = {delta, gamma, theta, vega, iv, ...}.
+    # We surface those across the trade window (entry_idx → exit_idx)
+    # as diagnostic time series so EVERY greek-using strategy gets a
+    # chart panel for free — no per-strategy instrumentation needed.
+    #
+    # Strategy-specific custom signals (proxy_vix, crush_floor, etc.)
+    # are merged in below — those override the auto-emitted entries if
+    # they collide on the same key.
+    auto_diag = _auto_greeks_diagnostics(bars, entry_idx, exit_idx)
+    if auto_diag:
+        existing = result.get('diagnostics') or {}
+        # Strategy-provided diagnostics win on key collision.
+        merged = {**auto_diag, **existing}
+        result['diagnostics'] = merged
+
     return result
+
+
+def _auto_greeks_diagnostics(bars, entry_idx, exit_idx):
+    """
+    Walk bars[entry_idx+1 : exit_idx+1] and pull delta, gamma, theta,
+    vega, iv out of each bar['greeks']. Returns a {key: {series, label,
+    unit, scaleHint}} dict matching the append_diag convention so the
+    frontend's existing sub-panel renderer picks it up unchanged.
+
+    Skips bars whose greeks are None (no spot at that minute, etc.).
+    Returns {} if no bar in the window had usable greeks.
+    """
+    if entry_idx is None or exit_idx is None or exit_idx <= entry_idx:
+        return {}
+
+    fields = [
+        # (greek_key, label,    unit, scaleHint, scale)
+        ('delta', 'Delta',     '',   'delta',      1.0),
+        ('gamma', 'Gamma',     '',   'gamma',      1.0),
+        ('theta', 'Theta',     '$',  'theta',      1.0),
+        ('vega',  'Vega',      '$',  'vega',       1.0),
+        # IV reported ×100 so it shares the volatility panel scale with
+        # proxy_vix / VIX trigger reference lines emitted by vol strategies.
+        ('iv',    'IV',        '%',  'volatility', 100.0),
+    ]
+
+    out = {}
+    end = min(exit_idx + 1, len(bars))
+    for i in range(entry_idx + 1, end):
+        bar = bars[i]
+        greeks = bar.get('greeks') if isinstance(bar, dict) else None
+        if not greeks:
+            continue
+        for key, label, unit, hint, scale in fields:
+            val = greeks.get(key)
+            if val is None:
+                continue
+            entry = out.setdefault(key, {
+                'series':    [],
+                'label':     label,
+                'unit':      unit,
+                'scaleHint': hint,
+            })
+            entry['series'].append({
+                'time':  bar['time'],
+                'value': round(val * scale, 4),
+            })
+    return out
