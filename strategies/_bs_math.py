@@ -224,13 +224,39 @@ def bs_greeks(S, K, T, r, sigma, option_type):
 def implied_vol(market_price, S, K, T, r, option_type,
                 initial_guess=0.5, max_iter=40, tol=1e-4):
     """
-    Newton-Raphson IV solver. Returns sigma such that BS(sigma) ≈ market_price.
-    Falls back to initial_guess if it can't converge.
+    IV solver: Newton-Raphson with bisection fallback. Returns sigma
+    such that BS(sigma) ≈ market_price.
+
+    Newton is tried first because it converges quadratically when it
+    works (typically 3–6 iters from a cold start, 1–2 from a warm
+    sigma_guess). It silently fails on three classes of input that the
+    old version returned a stale guess for:
+
+      1. NUMERICAL BREAKDOWN — log/sqrt domain errors, /0
+      2. NEAR-ZERO VEGA       — deep OTM/ITM where the gradient explodes
+      3. CLAMP TRAP           — true sigma outside [0.005, 5.0], Newton
+                                gets pinned and never escapes
+      4. MAX ITER EXHAUSTED   — Newton oscillates without converging
+
+    Any of those routes to bisection, which is bracket-guaranteed
+    (BS price is strictly monotonic in sigma) and converges in
+    ~log2((10 - 1e-4) / 1e-4) ≈ 17 iters.
+
+    Returns 0.0 on:
+      - Degenerate inputs (T ≤ 0, S/K/price ≤ 0)
+      - Pre-intrinsic prices (option < intrinsic → no IV is positive)
+      - Bisection bracket miss (input outside [1e-4, 10] vol range,
+        which is "deep arbitrage territory" or broken data)
+
+    Backward-compatible: public signature unchanged; only the failure
+    mode changed from "return whatever sigma was in the loop variable"
+    to "fall through to bisection" or "0.0 if even bisection can't
+    bracket."
     """
+    # ── 1. Pre-screen: degenerate or pre-intrinsic ─────────────
     if T <= 0 or market_price <= 0 or S <= 0 or K <= 0:
         return 0.0
 
-    # Hard floor: market price can't be less than intrinsic
     if option_type == 'C':
         intrinsic = max(0.0, S - K * math.exp(-r * T))
     else:
@@ -238,27 +264,97 @@ def implied_vol(market_price, S, K, T, r, option_type,
     if market_price <= intrinsic + 1e-6:
         return 0.0
 
-    sigma = initial_guess
+    # ── 2. Newton-Raphson ──────────────────────────────────────
+    sigma, ok = _newton_iv(market_price, S, K, T, r, option_type,
+                           initial_guess, max_iter=min(max_iter, 20), tol=tol)
+    if ok:
+        return sigma
+
+    # ── 3. Bisection fallback ──────────────────────────────────
+    return _bisect_iv(market_price, S, K, T, r, option_type,
+                      lo=1e-4, hi=10.0, max_iter=80, tol=tol)
+
+
+def _newton_iv(market_price, S, K, T, r, option_type, guess, max_iter, tol):
+    """
+    Newton step. Returns (sigma, converged_flag). The flag is the only
+    honest signal of success — `True` ONLY when the final price diff is
+    inside tol. All four failure modes documented in implied_vol() route
+    to `False` so the caller knows to fall through to bisection.
+    """
+    sigma = guess
+    clamp_hits = 0
+    SIGMA_LOW, SIGMA_HIGH = 0.005, 5.0
+
     for _ in range(max_iter):
         price = bs_price(S, K, T, r, sigma, option_type)
         diff  = price - market_price
         if abs(diff) < tol:
-            return sigma
-        # Vega for the Newton step
+            return sigma, True                # ← only honest success path
+
+        # FAILURE 1: numerical breakdown computing d1 → bisect
         try:
-            d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+            d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) \
+                 / (sigma * math.sqrt(T))
         except (ValueError, ZeroDivisionError):
-            return sigma
+            return sigma, False
+
+        # FAILURE 2: near-zero vega — Newton step explodes → bisect
         vega = S * _normal_pdf(d1) * math.sqrt(T)
         if vega < 1e-10:
-            return sigma
-        sigma = sigma - diff / vega
-        # Clamp to a sane range
-        if sigma <= 0.005:
-            sigma = 0.005
-        if sigma > 5.0:
-            sigma = 5.0
-    return sigma
+            return sigma, False
+
+        new_sigma = sigma - diff / vega
+
+        # FAILURE 3: clamp trap — Newton wants to step outside [LOW, HIGH]
+        # twice in a row, meaning true sigma is past the clamp. Bisection
+        # uses a wider bracket so it can reach it.
+        if new_sigma <= SIGMA_LOW:
+            new_sigma  = SIGMA_LOW
+            clamp_hits += 1
+        elif new_sigma >= SIGMA_HIGH:
+            new_sigma  = SIGMA_HIGH
+            clamp_hits += 1
+        else:
+            clamp_hits = 0
+        if clamp_hits >= 2:
+            return sigma, False
+
+        sigma = new_sigma
+
+    # FAILURE 4: max iterations exhausted without abs(diff) < tol
+    return sigma, False
+
+
+def _bisect_iv(market_price, S, K, T, r, option_type,
+               lo=1e-4, hi=10.0, max_iter=80, tol=1e-4):
+    """
+    Bracket-guaranteed IV solver. BS price is strictly monotonic in
+    sigma, so if market_price lies inside [BS(lo), BS(hi)] a root
+    exists and bisection finds it.
+
+    If market_price is OUTSIDE that price range (deep arbitrage,
+    σ < 1e-4 or > 10 — neither plausible for real options), returns
+    0.0 as a "we cannot represent this" signal.
+    """
+    f_lo = bs_price(S, K, T, r, lo, option_type) - market_price
+    f_hi = bs_price(S, K, T, r, hi, option_type) - market_price
+
+    # No sign change → market price isn't bracketed → bail.
+    if f_lo * f_hi > 0:
+        return 0.0
+
+    for _ in range(max_iter):
+        mid   = 0.5 * (lo + hi)
+        f_mid = bs_price(S, K, T, r, mid, option_type) - market_price
+        if abs(f_mid) < tol:
+            return mid
+        if f_lo * f_mid < 0:
+            hi, f_hi = mid, f_mid
+        else:
+            lo, f_lo = mid, f_mid
+
+    return 0.5 * (lo + hi)
 
 
 def years_to_expiry(bar_time_str, expiry_date, expiry_hour=16):
