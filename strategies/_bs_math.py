@@ -463,10 +463,26 @@ def enrich_bars_with_greeks(bars, contract, cfg, underlying_bars,
     except (ValueError, TypeError):
         expiry_dt = None
 
-    for bar in bars:
-        bar_time = bar['time']
-        S        = spot_at(spot_idx, bar_time)
+    prev_greeks   = None    # Last computed greek dict (carry-forward for synthetic bars)
+    prev_real_idx = -1      # Index of last REAL bar seen, for spot/T comparison
 
+    for i, bar in enumerate(bars):
+        bar_time = bar['time']
+
+        # Synthetic bars (carry-forward minutes added by data_provider.
+        # _pad_minute_gaps for Polygon gaps) have close==prev close and
+        # zero volume. Re-solving IV on them yields the same sigma as
+        # the prior bar, just with a slightly different T. We copy the
+        # prior bar's greeks instead — saves Newton iterations across
+        # large stretches of illiquid contracts (~30% of bars on some
+        # contracts).
+        if bar.get('synthetic') and prev_greeks is not None:
+            # Copy the dict so downstream mutations don't bleed across
+            # bars sharing the same reference.
+            bar['greeks'] = dict(prev_greeks)
+            continue
+
+        S = spot_at(spot_idx, bar_time)
         if S is None or S <= 0:
             # No spot at this timestamp — leave greeks empty so strategies
             # treat this bar as "unavailable". Do NOT substitute K for S.
@@ -501,6 +517,8 @@ def enrich_bars_with_greeks(bars, contract, cfg, underlying_bars,
         greeks['dte']    = dte
         greeks['S_used'] = round(S, 4)
         bar['greeks']    = greeks
+        prev_greeks      = greeks
+        prev_real_idx    = i
 
 
 def get_greek(bar, greek_name, fallback=None):
