@@ -126,19 +126,27 @@ def bs_vega(S, K, T, r, sigma):
 
 
 def bs_charm(S, K, T, r, sigma, option_type):
-    """Charm — dDelta/dT, per calendar day."""
+    """
+    Charm — dDelta/dT, per calendar day.
+
+    NOTE: With dividend yield q = 0 (our current assumption), call-charm
+    and put-charm are mathematically IDENTICAL. The dividend-yield term
+    ±q·e^(-qT)·N(±d1) is the only thing that splits them, and we don't
+    model q. The previous put-branch here added a spurious bond-discount
+    adjustment that fails parity against the published `blackscholes`
+    library (verified via tests/test_bs_parity.py: 64/64 put failures
+    before this fix, 0 after).
+
+    If/when we add dividend yield as a parameter, re-introduce the split
+    with the correct ±q·e^(-qT)·N(±d1) terms.
+    """
+    _ = option_type  # accepted for API symmetry; intentionally unused
     d1, d2 = _d1_d2(S, K, T, r, sigma)
     if d1 is None:
         return None
     pdf_d1 = _normal_pdf(d1)
     sqrt_T = math.sqrt(T)
-    # Annualised charm: same magnitude for call and put, sign convention
-    # below matches the common Hull / Wilmott form.
     annual = -pdf_d1 * (2.0 * r * T - d2 * sigma * sqrt_T) / (2.0 * T * sigma * sqrt_T)
-    if option_type == 'P':
-        # For puts the contribution from the cost-of-carry term flips sign.
-        annual = annual - r * math.exp(-r * T) * (1.0 - _normal_cdf(d2)) \
-                       + r * math.exp(-r * T) * _normal_cdf(d2)
     return annual / _CAL_DAYS
 
 
@@ -197,13 +205,10 @@ def bs_greeks(S, K, T, r, sigma, option_type):
         # Vega — per 1% IV move
         out['vega'] = S * sqrt_T * pdf_d1 / 100.0
 
-        # Charm — dDelta/dT per calendar day
+        # Charm — dDelta/dT per calendar day.
+        # Identical for calls and puts with q=0 (see bs_charm() comment).
         charm_annual = -pdf_d1 * (2.0 * r * T - d2 * sigma * sqrt_T) \
                        / (2.0 * T * sigma * sqrt_T)
-        if option_type == 'P':
-            charm_annual = charm_annual \
-                - r * disc * (1.0 - _normal_cdf(d2)) \
-                + r * disc * _normal_cdf(d2)
         out['charm'] = charm_annual / _CAL_DAYS
 
         # Vanna — dDelta/dSigma
