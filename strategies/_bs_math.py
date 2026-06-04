@@ -491,19 +491,38 @@ def enrich_bars_with_greeks(bars, contract, cfg, underlying_bars,
 
         T = years_to_expiry(bar_time, expiry_date)
 
-        # Implied vol — solve from bar close, warm-started.
-        bar_close = float(bar.get('close') or 0)
-        if solve_iv and bar_close > 0 and T > 0:
-            sigma = implied_vol(bar_close, S, K, T, r, option_type,
-                                initial_guess=sigma_guess)
-            if sigma and sigma > 0:
-                sigma_guess = sigma
+        # ── IV fast path: prefer pre-computed IV from the data provider
+        # (QC delivers iv per-bar; no Newton needed). Falls through to
+        # local Newton-Raphson only when the bar carries no iv field —
+        # e.g. underlying-only fetches or if we ever switch providers.
+        provider_iv = bar.get('iv') if isinstance(bar, dict) else None
+        if isinstance(provider_iv, (int, float)) and provider_iv > 0:
+            sigma = provider_iv
+            sigma_guess = sigma   # carry forward in case a later bar needs Newton
+        else:
+            # Implied vol — solve from bar close, warm-started.
+            bar_close = float(bar.get('close') or 0)
+            if solve_iv and bar_close > 0 and T > 0:
+                sigma = implied_vol(bar_close, S, K, T, r, option_type,
+                                    initial_guess=sigma_guess)
+                if sigma and sigma > 0:
+                    sigma_guess = sigma
+                else:
+                    sigma = hist_vol
             else:
                 sigma = hist_vol
-        else:
-            sigma = hist_vol
 
         greeks = bs_greeks(S, K, T, r, sigma, option_type)
+
+        # Pre-populated greek fast path: if QC supplied delta/gamma/etc.
+        # on the bar directly, prefer those over our locally-recomputed
+        # versions. They come from QC's own model (which accounts for
+        # things like American early-exercise that our European code
+        # doesn't), so they're more accurate.
+        for key in ('delta', 'gamma', 'theta', 'vega'):
+            v = bar.get(key) if isinstance(bar, dict) else None
+            if isinstance(v, (int, float)):
+                greeks[key] = v
 
         # DTE (calendar days remaining)
         dte = None
