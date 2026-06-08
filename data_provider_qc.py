@@ -90,8 +90,10 @@ def parse_contracts(raw_text: str) -> List[Dict]:
       OCC,YYYY-MM-DD,HH:MM       — entry date + time
       OCC                         — defaults to entry date = expiry, 09:30
     Lines starting with # are comments. Blank lines ignored.
+    Returns {'contracts': [...], 'errors': [...]}.
     """
-    out = []
+    contracts = []
+    errors = []
     for raw in (raw_text or '').splitlines():
         line = raw.strip()
         if not line or line.startswith('#'):
@@ -101,10 +103,11 @@ def parse_contracts(raw_text: str) -> List[Dict]:
         try:
             meta = parse_occ(occ)
         except ValueError as e:
-            raise ValueError(f'Bad line {raw!r}: {e}')
+            errors.append(f'Bad line {raw!r}: {e}')
+            continue
         entry_date = parts[1] if len(parts) > 1 and parts[1] else meta['expiry']
         entry_time = parts[2] if len(parts) > 2 and parts[2] else '09:30'
-        out.append({
+        contracts.append({
             'occ':       occ,
             'symbol':    meta['symbol'],
             'expiry':    meta['expiry'],
@@ -113,7 +116,7 @@ def parse_contracts(raw_text: str) -> List[Dict]:
             'entryDate': entry_date,
             'entryTime': entry_time,
         })
-    return out
+    return {'contracts': contracts, 'errors': errors}
 
 
 # ─────────────────────────────────────────────────────────────
