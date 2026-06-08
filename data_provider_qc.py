@@ -31,6 +31,7 @@
 
 import io
 import re
+import sys
 import zipfile
 import csv
 from datetime import datetime, timedelta, timezone
@@ -143,7 +144,12 @@ def _fetch_zip(file_path: str) -> Optional[bytes]:
     try:
         data = _client().download_file(file_path)
     except QCFileMissing:
+        print(f'[QC] 404 (no data): {file_path}', file=sys.stderr, flush=True)
         return None
+    except QCAuthError as e:
+        print(f'[QC] AUTH ERROR: {e}', file=sys.stderr, flush=True)
+        raise
+    print(f'[QC] fetched: {file_path} ({len(data):,} bytes)', file=sys.stderr, flush=True)
     cache.put(file_path, data)
     return data
 
@@ -274,6 +280,12 @@ def fetch_bars(occ: str, start_date: str, end_date: str, cfg=None) -> List[Dict]
                 bar['vega']  = _safe_float(row['vega'])
 
     bars = [bars_by_time[t] for t in sorted(bars_by_time)]
+    if not bars:
+        print(
+            f'[QC] fetch_bars({occ}, {start_date}→{end_date}): 0 bars — '
+            f'see lines above for 404/no-match detail',
+            file=sys.stderr, flush=True,
+        )
     return _pad_minute_gaps(bars)
 
 
@@ -354,13 +366,24 @@ def _read_zip_csv(zip_bytes: bytes, occ_parts: Dict,
     """
     out = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        for name in zf.namelist():
-            if not name.lower().endswith('.csv'):
-                continue
+        all_csv = [n for n in zf.namelist() if n.lower().endswith('.csv')]
+        matched = []
+        for name in all_csv:
             if not _matches_occ(name, occ_parts):
                 continue
+            matched.append(name)
             text = zf.read(name).decode('utf-8', errors='ignore')
             out.extend(_parse_lean_csv(text, columns))
+        if not matched and all_csv:
+            sample = all_csv[:3]
+            typ    = 'call' if occ_parts['type'] == 'C' else 'put'
+            strike = str(int(round(occ_parts['strike'] * 10000)))
+            expiry = occ_parts['expiry'].replace('-', '')
+            print(
+                f'[QC] no match — looking for {typ}/{strike}/{expiry} '
+                f'in ZIP with {len(all_csv)} files, sample: {sample}',
+                file=sys.stderr, flush=True,
+            )
     return out
 
 

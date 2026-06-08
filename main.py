@@ -442,7 +442,8 @@ def run_backtest():
             log(f'ERROR fetching {occ}: {errors_by_occ[occ]}')
             continue
         if occ not in bars_by_occ:
-            log(f'{occ}: no bars — skipping')
+            log(f'{occ}: no bars returned for {contract["entryDate"]}→{contract["expiry"]} '
+                f'— check Railway logs for 404 or no-match detail')
             continue
 
         bars  = bars_by_occ[occ]
