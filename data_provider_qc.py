@@ -87,8 +87,9 @@ def parse_occ(occ: str) -> Dict:
 def parse_contracts(raw_text: str) -> List[Dict]:
     """
     Parse a multi-line paste of contracts. Each line:
-      OCC,YYYY-MM-DD,HH:MM       — entry date + time
-      OCC                         — defaults to entry date = expiry, 09:30
+      OCC,HH:MM,YYYY-MM-DD       — entry time + entry date
+      OCC,HH:MM                  — 0DTE: entry date defaults to expiry
+      OCC                        — defaults to 09:30 entry, expiry as date
     Lines starting with # are comments. Blank lines ignored.
     Returns {'contracts': [...], 'errors': [...]}.
     """
@@ -105,8 +106,8 @@ def parse_contracts(raw_text: str) -> List[Dict]:
         except ValueError as e:
             errors.append(f'Bad line {raw!r}: {e}')
             continue
-        entry_date = parts[1] if len(parts) > 1 and parts[1] else meta['expiry']
-        entry_time = parts[2] if len(parts) > 2 and parts[2] else '09:30'
+        entry_time = parts[1] if len(parts) > 1 and parts[1] else '09:30'
+        entry_date = parts[2] if len(parts) > 2 and parts[2] else meta['expiry']
         contracts.append({
             'occ':       occ,
             'symbol':    meta['symbol'],
