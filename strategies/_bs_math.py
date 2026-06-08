@@ -470,7 +470,7 @@ def enrich_bars_with_greeks(bars, contract, cfg, underlying_bars,
         bar_time = bar['time']
 
         # Synthetic bars (carry-forward minutes added by data_provider.
-        # _pad_minute_gaps for Polygon gaps) have close==prev close and
+        # _pad_minute_gaps) have close==prev close and
         # zero volume. Re-solving IV on them yields the same sigma as
         # the prior bar, just with a slightly different T. We copy the
         # prior bar's greeks instead — saves Newton iterations across

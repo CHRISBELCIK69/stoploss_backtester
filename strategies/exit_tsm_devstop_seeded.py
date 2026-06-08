@@ -23,10 +23,10 @@
 #   stop    = entry - min(avg_DTR + 1.0 × sd, entry × max_stop_pct)
 # ============================================================
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import requests
 
+import data_provider_qc as dp
 from backtest_engine import to_minutes, should_eod_exit
 
 
@@ -88,10 +88,10 @@ def _calc_stop(dtr_window, entry, max_stop_pct):
 # Previous-day bar fetch
 # ─────────────────────────────────────────────
 
-def _fetch_prev_day_bars(occ, n_bars, entry_date, api_key):
+def _fetch_prev_day_bars(occ, n_bars, entry_date):
     """
     Fetch the last `n_bars` 1-min bars from the most recent
-    completed trading day BEFORE entry_date.
+    completed trading day BEFORE entry_date using QC data.
     Skips weekends/holidays automatically (tries back up to 5 days).
     """
     eastern = ZoneInfo('America/New_York')
@@ -103,30 +103,12 @@ def _fetch_prev_day_bars(occ, n_bars, entry_date, api_key):
     for days_back in range(1, 6):
         date_str = (entry_dt - timedelta(days=days_back)).strftime('%Y-%m-%d')
         try:
-            resp = requests.get(
-                f'https://api.polygon.io/v2/aggs/ticker/O:{occ}/range/1/minute/{date_str}/{date_str}',
-                params={'adjusted': 'false', 'sort': 'desc', 'limit': n_bars, 'apiKey': api_key},
-                timeout=15,
-            )
+            bars = dp.fetch_bars(occ, date_str, date_str)
         except Exception:
             continue
-        if not resp.ok:
+        if not bars:
             continue
-        results = resp.json().get('results')
-        if not results:
-            continue
-
-        results = list(reversed(results))
-        return [
-            {
-                'time':  datetime.fromtimestamp(r['t'] / 1000, tz=timezone.utc)
-                                  .astimezone(eastern)
-                                  .strftime('%Y-%m-%d %H:%M'),
-                'open':  r['o'], 'high': r['h'],
-                'low':   r['l'], 'close': r['c'],
-            }
-            for r in results
-        ], date_str
+        return bars[-n_bars:], date_str
 
     return [], None
 
@@ -142,16 +124,14 @@ def execute(bars, entry_idx, entry_price, params):
     eod_mins       = to_minutes(eod_time)
 
     contract = params.get('_contract', {})
-    cfg      = params.get('_config', {})
     occ      = contract.get('occ', '')
     entry_date = contract.get('entryDate', '')
-    api_key  = cfg.get('polygon', {}).get('apiKey', '').strip()
 
     # ── Seed DTR window from previous day ──
     prev_dtr = []
     prev_date = None
-    if occ and api_key and api_key != 'YOUR_POLYGON_API_KEY_HERE':
-        prev_bars, prev_date = _fetch_prev_day_bars(occ, period + 2, entry_date, api_key)
+    if occ:
+        prev_bars, prev_date = _fetch_prev_day_bars(occ, period + 2, entry_date)
         for i in range(2, len(prev_bars)):
             d = _calc_dtr(prev_bars, i)
             if d is not None:

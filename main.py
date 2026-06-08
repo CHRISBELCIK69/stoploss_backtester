@@ -22,8 +22,7 @@ from strategies._bs_math import enrich_bars_with_greeks
 # per contract per backtest run.
 MAX_ATR_DAYS = 30
 
-# Workers for concurrent HTTP fetches against Polygon.
-# Polygon allows enough parallelism that 10 is safe on most plans.
+# Workers for concurrent QC data fetches.
 FETCH_WORKERS = 10
 
 app = Flask(__name__, static_folder=None)
@@ -383,7 +382,7 @@ def run_backtest():
     # and writes bar['greeks'] = {delta, gamma, theta, vega, charm,
     # vanna, iv, T, dte, S_used} into every option bar.
     #
-    # Cost when triggered: 1 Polygon call per unique underlying symbol
+    # Cost when triggered: 1 QC fetch per unique underlying symbol
     # (e.g. SPY, QQQ) + ~10ms compute per contract. Zero cost when no
     # greeks-using strategy is selected.
     t0 = time.time()
@@ -452,7 +451,7 @@ def run_backtest():
         # Strategies look for `params['_cache']['dailyBars']` first
         # before falling back to their own fetch_daily_bars call.
         # Same pattern for underlying bars — exit_delta_threshold reads
-        # cache['underlyingBars'][symbol] to avoid a duplicate Polygon fetch.
+        # cache['underlyingBars'][symbol] to avoid a duplicate QC fetch.
         cached_underlying = {}
         sym = contract.get('symbol', '')
         ub_key = (sym, contract['entryDate'], contract['expiry'])

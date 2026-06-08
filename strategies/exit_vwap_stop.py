@@ -10,7 +10,7 @@
 #
 #   VWAP is the natural institutional intraday level. When an option
 #   in profit breaks back below VWAP and stays there, momentum has
-#   flipped. Polygon includes VWAP in every minute bar.
+#   flipped. VWAP is included in every minute bar.
 # ============================================================
 
 from backtest_engine import to_minutes, should_eod_exit

@@ -19,9 +19,8 @@
 #   regardless of the option's current price. Useful when you have
 #   a specific underlying-level thesis ("I'm out if SPY drops $5").
 #
-#   Underlying price is read from bar['vwap'] which Polygon
-#   populates on option bars. It is the option's VWAP, not the
-#   underlying's — this is a known limitation of using option
+#   Underlying price is read from bar['vwap'] (option VWAP, not the
+#   underlying's) — this is a known limitation of using option
 #   bars alone. For true underlying tracking, the underlying
 #   ticker (SPY, QQQ etc.) bars should be fetched separately.
 #   Until then, this strategy uses the option's open price as

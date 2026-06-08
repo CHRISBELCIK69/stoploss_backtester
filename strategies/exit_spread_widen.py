@@ -16,9 +16,9 @@
 #   $0.02 at entry widening to $0.10 is a much more reliable
 #   danger signal than any price level.
 #
-#   IMPORTANT: Polygon 1-min bars include bid/ask on quotes but
-#   NOT on aggregate bars. This strategy uses the bar's high/low
-#   spread as a proxy: spread_proxy = bar_high - bar_low.
+#   IMPORTANT: 1-min aggregate bars do not include bid/ask directly.
+#   This strategy uses the bar's high/low spread as a proxy:
+#   spread_proxy = bar_high - bar_low.
 #   At entry we record entry_spread = entry_bar high - low.
 #   This is an approximation — real bid/ask spread data would
 #   require a quote feed. The proxy is still useful as a vol

@@ -121,8 +121,7 @@ class QCClient:
           'option/usa/minute/spy/20260520_trade.zip'
         """
         result = self._post('/api/v2/data/links/read',
-                            {'filePath': file_path,
-                             'organizationId': os.environ.get('QC_ORG_ID', '')})
+                            {'filePath': file_path})
         if not result.get('success', True):
             err = result.get('errors') or result.get('message') or 'unknown error'
             raise QCFileMissing(f'QC link denied for {file_path}: {err}')

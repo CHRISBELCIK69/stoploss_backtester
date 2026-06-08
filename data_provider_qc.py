@@ -2,9 +2,9 @@
 # data_provider_qc.py
 # QuantConnect-backed implementation of the data_provider surface.
 #
-# Drop-in replacement for the Polygon-backed data_provider — exposes
-# identical function signatures so main.py and every strategy keep
-# working without edits.
+# QuantConnect-backed data provider. Exposes the same function
+# signatures as the prior provider so main.py and strategies need
+# no edits.
 #
 # Public surface (same as old data_provider):
 #   parse_contracts(raw_text)        — pure text, unchanged
@@ -42,8 +42,7 @@ from cache_qc  import get_cache
 
 
 # ─────────────────────────────────────────────────────────────
-# OCC parsing — identical to the prior Polygon-backed module
-# so callers don't change.
+# OCC parsing
 # ─────────────────────────────────────────────────────────────
 
 OCC_RE = re.compile(r'^([A-Z]{1,6})(\d{6})([CP])(\d{8})$')
@@ -374,7 +373,6 @@ def _safe_float(x) -> Optional[float]:
 def _pad_minute_gaps(bars: List[Dict], max_gap_minutes: int = 30) -> List[Dict]:
     """
     Fill missing intraday minutes with carry-forward synthetic bars.
-    Mirrors the same logic that lived in the Polygon-backed provider.
     Gaps > max_gap_minutes are NOT padded (overnight / lunch / halts).
     """
     if not bars:

@@ -4,7 +4,7 @@
 # VIX level trigger exit.
 #
 # HOW IT WORKS:
-#   VIX is not available in Polygon 1-min option bars. This strategy
+#   VIX is not available in QC 1-min option bars. This strategy
 #   provides two modes:
 #
 #   MODE 'proxy':

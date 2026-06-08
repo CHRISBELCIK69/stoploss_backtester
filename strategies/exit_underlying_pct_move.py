@@ -19,7 +19,7 @@
 #   regardless of what the option premium is doing due to IV changes.
 #
 #   IMPLEMENTATION NOTE:
-#   Polygon option 1-min bars do not include the underlying price.
+#   Option 1-min bars do not include the underlying price directly.
 #   This strategy infers the underlying's directional move from
 #   the option's open-to-current move scaled by entry delta.
 #   If delta is not available in params, it falls back to a

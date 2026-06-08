@@ -2,9 +2,8 @@
 # data_provider.py
 # QuantConnect-backed implementation of the data fetching surface.
 #
-# Polygon has been retired from this codebase — every fetch now goes
-# through data_provider_qc, which authenticates against the QC Data API
-# and returns bars enriched with QC's pre-computed IV + greeks.
+# All fetches go through data_provider_qc, which authenticates against
+# the QC Data API and returns bars enriched with QC's pre-computed IV + greeks.
 #
 # This module exists as a thin compatibility shim so the 22 strategy
 # files and main.py that already `from data_provider import ...`
