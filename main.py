@@ -6,7 +6,9 @@
 # ============================================================
 
 import json
+import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -26,6 +28,13 @@ MAX_ATR_DAYS = 30
 FETCH_WORKERS = 10
 
 app = Flask(__name__, static_folder=None)
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    tb = traceback.format_exc()
+    print(f'[ERROR] Unhandled exception: {e}\n{tb}', file=sys.stderr, flush=True)
+    return jsonify({'error': str(e), 'traceback': tb}), 500
 
 
 @app.route('/')
@@ -340,6 +349,8 @@ def run_backtest():
         try:
             return c['occ'], fetch_bars(c['occ'], c['entryDate'], c['expiry'], CONFIG), None
         except Exception as e:
+            tb = traceback.format_exc()
+            print(f'[ERROR] fetch_bars({c["occ"]}): {e}\n{tb}', file=sys.stderr, flush=True)
             return c['occ'], None, str(e)
 
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:

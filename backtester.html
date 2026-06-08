@@ -77,6 +77,33 @@
 </div>
 
 <script>
+// Fetch helper — parses JSON and surfaces real error details.
+// When the server returns HTML (e.g. a 502 gateway page or a Flask
+// traceback), resp.json() would throw a cryptic "Unexpected token '<'"
+// error. This reads the raw text first so the message is actionable.
+async function safeFetchJson(resp) {
+  const ct = resp.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    let text = '';
+    try { text = await resp.text(); } catch (_) {}
+    const preview = text.slice(0, 400).replace(/\s+/g, ' ').trim();
+    const msg = `HTTP ${resp.status} — server returned non-JSON (${ct || 'no content-type'}):\n${preview}`;
+    console.error('[backtester] safeFetchJson:', msg, '\nURL:', resp.url);
+    throw new Error(msg);
+  }
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    console.error('[backtester] JSON parse failed for', resp.url, '— status', resp.status);
+    throw new Error(`HTTP ${resp.status} — response is not valid JSON: ${e.message}`);
+  }
+  if (!resp.ok) {
+    console.error('[backtester] API error', resp.status, resp.url, data);
+  }
+  return data;
+}
+
 // Color generator — produces N visually distinct colors via golden-ratio HSL.
 // Scales to 200+ strategies without repeating identifiable hues.
 function generateColors(n) {
@@ -321,9 +348,9 @@ async function runBracketLab(contractId) {
         qty: 1,
       }),
     });
-    const data = await resp.json();
+    const data = await safeFetchJson(resp);
     if (!resp.ok) {
-      result.innerHTML = `<span class="neg">Error: ${data.error || 'unknown'}</span>`;
+      result.innerHTML = `<span class="neg">Error ${resp.status}: ${data.error || 'unknown'}</span>`;
       return;
     }
     const r = data.result;
@@ -341,6 +368,7 @@ async function runBracketLab(contractId) {
 
     overlayLabResultOnChart(contractId, r, tp, sl);
   } catch (e) {
+    console.error('[backtester] runBracketLab error:', e);
     result.innerHTML = `<span class="neg">Request failed: ${e.message}</span>`;
   }
 }
@@ -1445,9 +1473,9 @@ async function runCustomStrategy(contractId) {
         code, qty: 1,
       }),
     });
-    const data = await resp.json();
+    const data = await safeFetchJson(resp);
     if (!resp.ok) {
-      out.innerHTML = `<span class="neg">${(data.error || 'unknown').toString()
+      out.innerHTML = `<span class="neg">Error ${resp.status}: ${(data.error || 'unknown').toString()
         .replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>`;
       if (data.traceback) out.innerHTML += `<pre class="fit-traceback">${data.traceback
         .replace(/&/g,'&amp;').replace(/</g,'&lt;')}</pre>`;
@@ -1463,6 +1491,7 @@ async function runCustomStrategy(contractId) {
       <span style="color:var(--text-muted);font-size:11px">${fmtTsShort(r.exitTs)}</span>`;
     overlayCustomResultOnChart(contractId, r);
   } catch (e) {
+    console.error('[backtester] runCustomStrategy error:', e);
     out.innerHTML = `<span class="neg">Request failed: ${e.message}</span>`;
   }
 }
@@ -2897,9 +2926,9 @@ async function runBacktest() {
     });
 
     setProgress(80);
-    const data = await resp.json();
+    const data = await safeFetchJson(resp);
 
-    if (!resp.ok) { showError(data.error || 'Server error'); return; }
+    if (!resp.ok) { showError(`Error ${resp.status}: ${data.error || 'Server error'}`); return; }
 
     // Show log
     if (data.log) {
@@ -2963,6 +2992,7 @@ async function runBacktest() {
     renderContractGrid(contracts);
 
   } catch (e) {
+    console.error('[backtester] runBacktest error:', e);
     showError('Request failed: ' + e.message);
   } finally {
     setProgress(100);
