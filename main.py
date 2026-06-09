@@ -11,6 +11,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 from config              import CONFIG
 from data_provider       import parse_contracts, fetch_bars, fetch_daily_bars, fetch_underlying_bars
@@ -32,6 +33,8 @@ app = Flask(__name__, static_folder=None)
 
 @app.errorhandler(Exception)
 def handle_unhandled_exception(e):
+    if isinstance(e, HTTPException):
+        return e  # let Flask handle 404/405/etc normally
     tb = traceback.format_exc()
     print(f'[ERROR] Unhandled exception: {e}\n{tb}', file=sys.stderr, flush=True)
     return jsonify({'error': str(e), 'traceback': tb}), 500
