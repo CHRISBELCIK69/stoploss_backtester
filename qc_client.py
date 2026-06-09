@@ -97,15 +97,21 @@ class QCClient:
         url = f'{self.base_url}{path}'
         resp = requests.post(url, headers=self._auth_headers(),
                              data=json.dumps(payload), timeout=self.timeout)
-        if resp.status_code == 401 or resp.status_code == 403:
-            raise QCAuthError(f'QC rejected auth: {resp.status_code} {resp.text[:200]}')
+        if resp.status_code in (401, 403):
+            raise QCAuthError(f'QC auth rejected ({resp.status_code}): {resp.text[:400]}')
         if resp.status_code == 404:
-            raise QCFileMissing(f'QC 404 for {path}: {resp.text[:200]}')
+            raise QCFileMissing(f'QC API 404 for {path} — endpoint may be wrong: {resp.text[:200]}')
         resp.raise_for_status()
         try:
             return resp.json()
         except ValueError:
             return {'_raw': resp.text}
+
+    def _post_raw(self, path: str, payload: dict) -> requests.Response:
+        """Return the raw response object (for diagnostics)."""
+        url = f'{self.base_url}{path}'
+        return requests.post(url, headers=self._auth_headers(),
+                             data=json.dumps(payload), timeout=self.timeout)
 
     # ─────────────────────────────────────────────────────────────
     # Data file fetch
@@ -123,11 +129,11 @@ class QCClient:
         result = self._post('/api/v2/data/links/read',
                             {'filePath': file_path})
         if not result.get('success', True):
-            err = result.get('errors') or result.get('message') or 'unknown error'
-            raise QCFileMissing(f'QC link denied for {file_path}: {err}')
+            err = result.get('errors') or result.get('message') or result
+            raise QCFileMissing(f'QC denied {file_path}: {err}')
         link = result.get('link') or result.get('url')
         if not link:
-            raise QCFileMissing(f'QC returned no link for {file_path}: {result}')
+            raise QCFileMissing(f'QC returned no link for {file_path} — full response: {result}')
         return link
 
     def download_file(self, file_path: str) -> bytes:

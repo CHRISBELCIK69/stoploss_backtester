@@ -143,8 +143,8 @@ def _fetch_zip(file_path: str) -> Optional[bytes]:
         return cached
     try:
         data = _client().download_file(file_path)
-    except QCFileMissing:
-        print(f'[QC] 404 (no data): {file_path}', file=sys.stderr, flush=True)
+    except QCFileMissing as e:
+        print(f'[QC] NOT FOUND: {file_path} — {e}', file=sys.stderr, flush=True)
         return None
     except QCAuthError as e:
         print(f'[QC] AUTH ERROR: {e}', file=sys.stderr, flush=True)

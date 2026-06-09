@@ -40,6 +40,45 @@ def handle_unhandled_exception(e):
     return jsonify({'error': str(e), 'traceback': tb}), 500
 
 
+@app.route('/api/qc_test')
+def qc_test():
+    """
+    Diagnostic endpoint — visit /api/qc_test in your browser to verify
+    QC credentials and data access without running a full backtest.
+    Tests auth + one known path and returns the raw QC response.
+    """
+    from qc_client import QCClient, QCFileMissing, QCAuthError
+    results = {}
+    try:
+        client = QCClient()
+        results['user_id'] = client.user_id
+        results['base_url'] = client.base_url
+
+        # Test 1: auth ping via /api/v2/authenticate
+        raw = client._post_raw('/api/v2/authenticate', {})
+        results['auth_status'] = raw.status_code
+        try:
+            results['auth_body'] = raw.json()
+        except Exception:
+            results['auth_body'] = raw.text[:300]
+
+        # Test 2: try a real data link for a well-known SPY file
+        test_path = 'option/usa/minute/spy/20240102_trade.zip'
+        raw2 = client._post_raw('/api/v2/data/links/read', {'filePath': test_path})
+        results['data_link_status'] = raw2.status_code
+        try:
+            results['data_link_body'] = raw2.json()
+        except Exception:
+            results['data_link_body'] = raw2.text[:300]
+
+    except QCAuthError as e:
+        results['error'] = f'Auth error: {e}'
+    except Exception as e:
+        results['error'] = str(e)
+
+    return jsonify(results)
+
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'backtester.html')
