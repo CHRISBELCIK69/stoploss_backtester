@@ -43,18 +43,39 @@ def handle_unhandled_exception(e):
 @app.route('/api/qc_test')
 def qc_test():
     """
-    Diagnostic endpoint — visit /api/qc_test in your browser to verify
-    QC credentials and data access without running a full backtest.
-    Tests auth + one known path and returns the raw QC response.
+    Diagnostic endpoint — visit /api/qc_test in your browser.
+
+    Tests 4 things in order:
+      1. Auth (are credentials valid?)
+      2. SPY equity minute  — included in QC's free Researcher plan
+      3. SPY option minute  — requires 'US Equity Options, Minute' add-on
+      4. SPY option daily   — included in free plan
+
+    If test 2 passes but test 3 fails with "Not entitled", you need to add
+    the 'US Equity Options, Minute' data subscription in your QC account
+    (quantconnect.com → Account → Data → Add Data).
+
+    If test 2 also fails, the issue is with your API credentials or base URL.
     """
     from qc_client import QCClient, QCFileMissing, QCAuthError
+
+    def _probe(client, file_path):
+        raw = client._post_raw('/api/v2/data/links/read', {'filePath': file_path})
+        try:
+            body = raw.json()
+        except Exception:
+            body = {'_raw': raw.text[:500]}
+        ok = raw.status_code == 200 and body.get('success', False)
+        err = body.get('errors') or body.get('message') or (None if ok else body)
+        return {'status': raw.status_code, 'success': ok, 'error': err, 'body': body}
+
     results = {}
     try:
         client = QCClient()
         results['user_id'] = client.user_id
         results['base_url'] = client.base_url
 
-        # Test 1: auth ping via /api/v2/authenticate
+        # 1. Auth
         raw = client._post_raw('/api/v2/authenticate', {})
         results['auth_status'] = raw.status_code
         try:
@@ -62,14 +83,29 @@ def qc_test():
         except Exception:
             results['auth_body'] = raw.text[:300]
 
-        # Test 2: try a real data link for a well-known SPY file
-        test_path = 'option/usa/minute/spy/20240102_trade.zip'
-        raw2 = client._post_raw('/api/v2/data/links/read', {'filePath': test_path})
-        results['data_link_status'] = raw2.status_code
-        try:
-            results['data_link_body'] = raw2.json()
-        except Exception:
-            results['data_link_body'] = raw2.text[:300]
+        # 2. Equity minute (should work on free plan)
+        results['equity_minute'] = _probe(client, 'equity/usa/minute/spy/20240102_trade.zip')
+
+        # 3. Option minute (requires paid add-on)
+        results['option_minute'] = _probe(client, 'option/usa/minute/spy/20240102_trade.zip')
+
+        # 4. Option daily (free)
+        results['option_daily'] = _probe(client, 'option/usa/daily/spy.zip')
+
+        # Diagnosis
+        eq_ok  = results['equity_minute']['success']
+        opt_ok = results['option_minute']['success']
+        if not eq_ok and not opt_ok:
+            results['diagnosis'] = 'AUTH/CREDENTIAL issue — even equity minute data fails. Check QC_USER_ID and QC_API_TOKEN.'
+        elif eq_ok and not opt_ok:
+            opt_err = str(results['option_minute'].get('error', ''))
+            results['diagnosis'] = (
+                'SUBSCRIPTION issue — equity data works but option minute data does not. '
+                f'QC error: {opt_err}. '
+                'Fix: quantconnect.com → Account → Data → add "US Equity Options, Minute".'
+            )
+        else:
+            results['diagnosis'] = 'All checks passed — data should be accessible.'
 
     except QCAuthError as e:
         results['error'] = f'Auth error: {e}'

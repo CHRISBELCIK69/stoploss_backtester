@@ -44,6 +44,7 @@ In the Variables tab:
 | `QC_API_TOKEN`       | yes      | (your token)             | Same screen.                                                     |
 | `QC_DATA_CACHE_DIR`  | yes      | `/data/cache`            | Must match the volume mount path above.                          |
 | `QC_CACHE_MAX_GB`    | no       | `10`                     | LRU eviction trigger.                                            |
+| `QC_DATA_DIR`        | no       | `/data/lean`             | Root of a local Lean data directory (see below). When set, ZIPs are read from disk first and saved here after every API download — eliminating repeat API calls. Populate with `lean data download` or let the app self-populate on first access. |
 | `QC_API_BASE`        | no       | (defaults to QC's prod)  | Override for staging/testing.                                    |
 | `QC_DATA_DIR_OPTION` | no       | `option/usa/minute`      | Lean path template — only override if QC restructures.           |
 | `QC_DATA_DIR_IV`     | no       | `option/usa/iv/minute`   | Lean path template for the IV/greeks dataset.                    |
@@ -59,6 +60,28 @@ Railway sets `PORT` automatically — don't override it.
 Project → **Settings → Networking → Generate Domain**.
 
 (Optional) Add a custom domain on the same page and update DNS.
+
+## Pre-loading data with Lean CLI (optional)
+
+If you have the `QC_DATA_DIR` volume set, you can pre-populate it locally
+using the Lean CLI instead of waiting for the app to download on first access:
+
+```bash
+pip install lean
+lean login           # enter QC user ID + API token when prompted
+
+lean data download \
+  --data-type option_minute \
+  --tickers "SPY,META,AMD" \
+  --start 20260401 \
+  --end 20260411
+
+# Upload to Railway volume (adjust path as needed)
+railway run -- rsync -av ./data/ /data/lean/
+```
+
+Once files are on the volume, set `QC_DATA_DIR=/data/lean` and all reads
+for those contracts/dates will come from disk with zero API calls.
 
 ## Auto-deploy
 

@@ -30,11 +30,12 @@
 # ============================================================
 
 import io
+import os
 import re
 import sys
 import zipfile
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional, Tuple
 
@@ -136,20 +137,54 @@ def _client() -> QCClient:
 
 
 def _fetch_zip(file_path: str) -> Optional[bytes]:
-    """Fetch a Lean data ZIP, hitting the cache first. None if missing."""
+    """
+    Return bytes for a Lean data ZIP. Priority order:
+      1. In-memory cache (already downloaded this session)
+      2. Local Lean data directory (QC_DATA_DIR env var)
+      3. QC Data API (authenticated download)
+    """
     cache = get_cache()
     cached = cache.get(file_path)
     if cached is not None:
         return cached
+
+    # Local Lean data directory (populated by `lean data download`)
+    data_dir = os.environ.get('QC_DATA_DIR', '').strip()
+    if data_dir:
+        local_path = os.path.join(data_dir, file_path)
+        if os.path.isfile(local_path):
+            with open(local_path, 'rb') as f:
+                data = f.read()
+            print(f'[QC] local: {file_path} ({len(data):,} bytes)', file=sys.stderr, flush=True)
+            cache.put(file_path, data)
+            return data
+
+    # Fall back to QC Data API
     try:
         data = _client().download_file(file_path)
     except QCFileMissing as e:
-        print(f'[QC] NOT FOUND: {file_path} — {e}', file=sys.stderr, flush=True)
+        msg = str(e)
+        if 'entitled' in msg.lower() or 'not authorized' in msg.lower() or 'subscription' in msg.lower():
+            tag = '[QC] SUBSCRIPTION'
+            hint = ' — add "US Equity Options, Minute" at quantconnect.com → Account → Data'
+        else:
+            tag = '[QC] NOT FOUND'
+            hint = ''
+        print(f'{tag}: {file_path} — {msg}{hint}', file=sys.stderr, flush=True)
         return None
     except QCAuthError as e:
         print(f'[QC] AUTH ERROR: {e}', file=sys.stderr, flush=True)
         raise
     print(f'[QC] fetched: {file_path} ({len(data):,} bytes)', file=sys.stderr, flush=True)
+
+    # Persist to local data dir so future requests skip the API entirely
+    if data_dir:
+        local_path = os.path.join(data_dir, file_path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, 'wb') as f:
+            f.write(data)
+        print(f'[QC] saved: {local_path}', file=sys.stderr, flush=True)
+
     cache.put(file_path, data)
     return data
 
@@ -282,8 +317,9 @@ def fetch_bars(occ: str, start_date: str, end_date: str, cfg=None) -> List[Dict]
     bars = [bars_by_time[t] for t in sorted(bars_by_time)]
     if not bars:
         print(
-            f'[QC] fetch_bars({occ}, {start_date}→{end_date}): 0 bars — '
-            f'see lines above for 404/no-match detail',
+            f'[QC] no bars returned for {occ}: {start_date}→{end_date}'
+            f' — check QC subscription or run: lean data download'
+            f' --data-type option_minute --tickers {occ[:3]} --start {start_date.replace("-","")} --end {end_date.replace("-","")}',
             file=sys.stderr, flush=True,
         )
     return _pad_minute_gaps(bars)
